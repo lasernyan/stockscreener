@@ -34,12 +34,12 @@ USE_TREND_FILTER = True         # Only trade in trend direction
 
 # ── Improvement: Trailing Stop ────────────────────────────────────────────
 USE_TRAILING_STOP = True        # Replace fixed TP with trailing stop
-TRAIL_ACTIVATION_ATR = 1.0      # Activate trailing after 1x ATR favorable move
-TRAIL_DISTANCE_ATR = 2.0        # Trail distance = 2x ATR behind best price
+TRAIL_ACTIVATION_ATR = 2.0      # Activate trailing after 2x ATR favorable move
+TRAIL_DISTANCE_ATR = 3.0        # Trail distance = 3x ATR behind best price
 
 # ── Improvement: Breakeven Stop ───────────────────────────────────────────
 USE_BREAKEVEN_STOP = True       # Move SL to entry after favorable move
-BREAKEVEN_ATR = 1.0             # ATR multiple to trigger breakeven
+BREAKEVEN_ATR = 1.5             # ATR multiple to trigger breakeven
 
 # ── Improvement: Cooldown After SL ────────────────────────────────────────
 COOLDOWN_BARS = 5               # Bars to wait after SL before new entry

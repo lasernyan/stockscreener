@@ -35,13 +35,13 @@ trendMaPeriod  = input.int(200, "Trend MA Period", minval=50, maxval=500, group=
 // ── Inputs: Trailing Stop ────────────────────────────────────────────────
 grp_trail = "Trailing Stop"
 useTrailingStop   = input.bool(true, "Enable Trailing Stop", group=grp_trail)
-trailActivationATR = input.float(1.0, "Trail Activation (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_trail)
-trailDistanceATR   = input.float(2.0, "Trail Distance (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_trail)
+trailActivationATR = input.float(2.0, "Trail Activation (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_trail)
+trailDistanceATR   = input.float(3.0, "Trail Distance (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_trail)
 
 // ── Inputs: Breakeven Stop ───────────────────────────────────────────────
 grp_be = "Breakeven Stop"
 useBreakevenStop = input.bool(true, "Enable Breakeven Stop", group=grp_be)
-breakevenATR     = input.float(1.0, "Breakeven Trigger (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_be)
+breakevenATR     = input.float(1.5, "Breakeven Trigger (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_be)
 
 // ── Inputs: Cooldown ─────────────────────────────────────────────────────
 grp_cd = "Cooldown"
