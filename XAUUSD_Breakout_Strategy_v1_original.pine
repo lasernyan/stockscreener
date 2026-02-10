@@ -1,0 +1,248 @@
+// This Pine Script(TM) v6 indicator/strategy is subject to the Terms of Use:
+// https://www.tradingview.com/pine-script-docs/
+// XAUUSD Breakout Strategy (Improved)
+// ====================================
+// 20-period channel breakout with:
+//   - 200 MA trend filter
+//   - ADX regime filter
+//   - ATR trailing stop + breakeven stop
+//   - SL cooldown (anti-whipsaw)
+//   - Long-only bias option
+
+//@version=6
+strategy("XAUUSD Breakout Strategy", overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=2,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=1,
+     calc_on_every_tick=false)
+
+// ── Inputs: Core Strategy ────────────────────────────────────────────────
+grp_core = "Core Strategy"
+lookback       = input.int(20, "Channel Lookback", minval=5, maxval=100, group=grp_core)
+atrPeriod      = input.int(14, "ATR Period", minval=1, maxval=50, group=grp_core)
+atrSlMult      = input.float(1.5, "SL Multiplier (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_core)
+atrTpMult      = input.float(3.0, "TP Multiplier (ATR)", minval=1.0, maxval=10.0, step=0.1, group=grp_core,
+                     tooltip="Used only when trailing stop is disabled")
+
+// ── Inputs: Trend Filter ─────────────────────────────────────────────────
+grp_trend = "Trend Filter"
+useTrendFilter = input.bool(true, "Enable 200 MA Trend Filter", group=grp_trend)
+trendMaPeriod  = input.int(200, "Trend MA Period", minval=50, maxval=500, group=grp_trend)
+
+// ── Inputs: Trailing Stop ────────────────────────────────────────────────
+grp_trail = "Trailing Stop"
+useTrailingStop   = input.bool(true, "Enable Trailing Stop", group=grp_trail)
+trailActivationATR = input.float(2.0, "Trail Activation (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_trail)
+trailDistanceATR   = input.float(3.0, "Trail Distance (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_trail)
+
+// ── Inputs: Breakeven Stop ───────────────────────────────────────────────
+grp_be = "Breakeven Stop"
+useBreakevenStop = input.bool(true, "Enable Breakeven Stop", group=grp_be)
+breakevenATR     = input.float(1.5, "Breakeven Trigger (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_be)
+
+// ── Inputs: Cooldown ─────────────────────────────────────────────────────
+grp_cd = "Cooldown"
+cooldownBars = input.int(5, "Cooldown Bars After SL", minval=0, maxval=20, group=grp_cd)
+
+// ── Inputs: ADX Filter ───────────────────────────────────────────────────
+grp_adx = "ADX Filter"
+useAdxFilter = input.bool(true, "Enable ADX Filter", group=grp_adx)
+adxPeriod    = input.int(14, "ADX Period", minval=5, maxval=50, group=grp_adx)
+adxThreshold = input.int(20, "ADX Threshold", minval=10, maxval=50, group=grp_adx)
+
+// ── Inputs: Direction Bias ───────────────────────────────────────────────
+grp_dir = "Direction Bias"
+longOnly = input.bool(false, "Long Only (No Shorts)", group=grp_dir)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INDICATOR CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Channel breakout levels (shifted by 1 bar to avoid look-ahead)
+upperChannel = ta.highest(high, lookback)[1]
+lowerChannel = ta.lowest(low, lookback)[1]
+
+// ATR
+atrValue = ta.atr(atrPeriod)
+
+// 200-period SMA
+ma200 = ta.sma(close, trendMaPeriod)
+
+// ADX via DMI
+[diPlus, diMinus, adxValue] = ta.dmi(adxPeriod, adxPeriod)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL GENERATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Base breakout signals
+baseLong  = close > upperChannel
+baseShort = close < lowerChannel
+
+// Apply trend filter
+trendLongOk  = useTrendFilter ? close > ma200 : true
+trendShortOk = useTrendFilter ? close < ma200 : true
+
+// Apply ADX filter
+adxOk = useAdxFilter ? adxValue > adxThreshold : true
+
+// Combined signals
+longSignal  = baseLong and trendLongOk and adxOk
+shortSignal = baseShort and trendShortOk and adxOk and not longOnly
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE VARIABLES (persist across bars)
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entryPrice      = na
+var float currentSL       = na
+var float bestPrice       = na
+var float trailATR        = na
+var bool  trailingActive  = false
+var bool  breakevenHit    = false
+var int   cooldownRemaining = 0
+var bool  wasInPosition   = false
+var float prevSL          = na  // track SL for exit detection
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COOLDOWN MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Detect SL exit: was in position last bar, now flat, and closed at/near SL level
+justExited = wasInPosition and strategy.position_size == 0
+wasSLExit  = justExited and not trailingActive and not breakevenHit
+
+if cooldownRemaining > 0
+    cooldownRemaining := cooldownRemaining - 1
+
+if wasSLExit
+    cooldownRemaining := cooldownBars
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+canEnter = strategy.position_size == 0 and cooldownRemaining == 0 and not na(atrValue) and atrValue > 0
+
+if canEnter and longSignal
+    entryPrice     := close
+    currentSL      := close - atrSlMult * atrValue
+    bestPrice      := close
+    trailATR       := atrValue
+    trailingActive := false
+    breakevenHit   := false
+    strategy.entry("Long", strategy.long)
+
+if canEnter and shortSignal
+    entryPrice     := close
+    currentSL      := close + atrSlMult * atrValue
+    bestPrice      := close
+    trailATR       := atrValue
+    trailingActive := false
+    breakevenHit   := false
+    strategy.entry("Short", strategy.short)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT: TRAILING STOP + BREAKEVEN
+// ═══════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size > 0  // LONG
+    // Update best price
+    bestPrice := math.max(nz(bestPrice), high)
+
+    // Breakeven: move SL to entry after 1x ATR move
+    if useBreakevenStop and not breakevenHit
+        if bestPrice >= entryPrice + breakevenATR * trailATR
+            currentSL    := math.max(nz(currentSL), entryPrice)
+            breakevenHit := true
+
+    // Trailing stop
+    if useTrailingStop
+        if trailingActive
+            trailSL   = bestPrice - trailDistanceATR * trailATR
+            currentSL := math.max(nz(currentSL), trailSL)
+        else
+            if bestPrice >= entryPrice + trailActivationATR * trailATR
+                trailingActive := true
+                trailSL        = bestPrice - trailDistanceATR * trailATR
+                currentSL      := math.max(nz(currentSL), trailSL)
+
+    // Set exit
+    if useTrailingStop
+        strategy.exit("Exit Long", "Long", stop=currentSL)
+    else
+        tpPrice = entryPrice + atrTpMult * trailATR
+        strategy.exit("Exit Long", "Long", stop=currentSL, limit=tpPrice)
+
+else if strategy.position_size < 0  // SHORT
+    // Update best price (lowest for shorts)
+    bestPrice := math.min(nz(bestPrice, 1e18), low)
+
+    // Breakeven
+    if useBreakevenStop and not breakevenHit
+        if bestPrice <= entryPrice - breakevenATR * trailATR
+            currentSL    := math.min(nz(currentSL, 1e18), entryPrice)
+            breakevenHit := true
+
+    // Trailing stop for shorts
+    if useTrailingStop
+        if trailingActive
+            trailSL   = bestPrice + trailDistanceATR * trailATR
+            currentSL := math.min(nz(currentSL, 1e18), trailSL)
+        else
+            if bestPrice <= entryPrice - trailActivationATR * trailATR
+                trailingActive := true
+                trailSL        = bestPrice + trailDistanceATR * trailATR
+                currentSL      := math.min(nz(currentSL, 1e18), trailSL)
+
+    // Set exit
+    if useTrailingStop
+        strategy.exit("Exit Short", "Short", stop=currentSL)
+    else
+        tpPrice = entryPrice - atrTpMult * trailATR
+        strategy.exit("Exit Short", "Short", stop=currentSL, limit=tpPrice)
+
+
+// Update position tracking for next bar
+wasInPosition := strategy.position_size != 0
+prevSL        := currentSL
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Channel lines
+plot(upperChannel, "Upper Channel", color=color.new(color.green, 60), linewidth=1, style=plot.style_stepline)
+plot(lowerChannel, "Lower Channel", color=color.new(color.red, 60), linewidth=1, style=plot.style_stepline)
+
+// 200 MA
+plot(useTrendFilter ? ma200 : na, "200 MA", color=color.orange, linewidth=2)
+
+// Dynamic stop-loss level (only when in position)
+slColor = strategy.position_size > 0 ? color.new(color.red, 30) :
+          strategy.position_size < 0 ? color.new(color.red, 30) : na
+plot(strategy.position_size != 0 ? currentSL : na, "Stop Loss", color=slColor,
+     linewidth=1, style=plot.style_circles)
+
+// Entry signals
+plotshape(canEnter and longSignal, "Long Signal", shape.triangleup,
+          location.belowbar, color.green, size=size.small)
+plotshape(canEnter and shortSignal, "Short Signal", shape.triangledown,
+          location.abovebar, color.red, size=size.small)
+
+// Cooldown indicator
+bgcolor(cooldownRemaining > 0 ? color.new(color.gray, 90) : na, title="Cooldown Zone")
+
+// ── ADX Pane ──
+// plot(adxValue, "ADX", color=color.teal, linewidth=1, display=display.pane)
+// hline(adxThreshold, "ADX Threshold", color=color.red, linestyle=hline.style_dashed, display=display.pane)
