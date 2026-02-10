@@ -71,6 +71,9 @@ chandelierMult  = input.float(3.0, "シャンデリアストップ (ATR倍)", mi
 partialTpAtr    = input.float(2.5, "部分利確 (ATR倍)", minval=1.0, maxval=5.0, step=0.1, group=grp_risk,
                      tooltip="この利益に達したらポジションの50%を利確")
 usePartialTp    = input.bool(true, "部分利確を有効化", group=grp_risk)
+ma200Len        = input.int(200, "200MA 期間", minval=50, maxval=500, group=grp_risk)
+tpDeviationPct  = input.float(10.0, "TP乖離率条件 (%)", minval=1.0, maxval=30.0, step=0.5, group=grp_risk,
+                     tooltip="200MAからの乖離率がこの値以上の時のみ部分利確を実行")
 
 // ── ボラティリティ適応 ───────────────────────────────────────────────────
 grp_vol = "Volatility Adaptation"
@@ -99,6 +102,10 @@ shortOnly       = input.bool(false, "ショートのみ", group=grp_dir)
 
 // ── ATR ──────────────────────────────────────────────────────────────────
 atrValue = ta.atr(atrLen)
+
+// ── 200MA & 乖離率 ──────────────────────────────────────────────────────
+ma200 = ta.sma(close, ma200Len)
+deviationPct = (close - ma200) / ma200 * 100  // 正=上方乖離, 負=下方乖離
 
 // ── Kaufman Efficiency Ratio ─────────────────────────────────────────────
 // ER = |方向の変化| / 経路の合計 → 1に近いほどトレンド的
@@ -226,9 +233,9 @@ if strategy.position_size > 0  // ── LONG ──
     // ストップは初期SLを下回らない
     trailStop := math.max(trailStop, initialSL)
 
-    // 部分利確
+    // 部分利確 (ATR利益 + 200MA乖離率条件)
     if usePartialTp and not partialTaken
-        if high >= entryPrice + partialTpAtr * entryATR
+        if high >= entryPrice + partialTpAtr * entryATR and deviationPct >= tpDeviationPct
             strategy.close("Long", comment="Partial TP", qty_percent=50)
             partialTaken := true
             // 部分利確後、ストップをエントリー価格に引き上げ
@@ -253,9 +260,9 @@ else if strategy.position_size < 0  // ── SHORT ──
     // ストップは初期SLを上回らない
     trailStop := math.min(trailStop, initialSL)
 
-    // 部分利確
+    // 部分利確 (ATR利益 + 200MA乖離率条件)
     if usePartialTp and not partialTaken
-        if low <= entryPrice - partialTpAtr * entryATR
+        if low <= entryPrice - partialTpAtr * entryATR and deviationPct <= -tpDeviationPct
             strategy.close("Short", comment="Partial TP", qty_percent=50)
             partialTaken := true
             trailStop := math.min(trailStop, entryPrice)
@@ -284,6 +291,9 @@ bgcolor(regimeColor, title="Regime Background")
 
 // ── トレンドEMA ──────────────────────────────────────────────────────────
 plot(trendEma, "Trend EMA", color=color.new(color.yellow, 20), linewidth=2)
+
+// ── 200MA ────────────────────────────────────────────────────────────────
+plot(ma200, "200 MA", color=color.new(color.white, 40), linewidth=2, style=plot.style_line)
 
 // ── 週足EMA ──────────────────────────────────────────────────────────────
 plot(useMacroFilter ? weeklyEma : na, "Weekly EMA", color=color.orange, linewidth=3, style=plot.style_stepline)
