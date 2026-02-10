@@ -45,6 +45,7 @@ erThreshold     = input.float(0.40, "トレンド判定閾値", minval=0.1, maxv
 
 // ── トレンドモード: EMA押し目/戻りエントリー ─────────────────────────────
 grp_trend = "Trend Mode (Pullback)"
+useTrendMode    = input.bool(true, "トレンドモード有効", group=grp_trend)
 trendEmaLen     = input.int(21, "トレンドEMA期間", minval=10, maxval=100, group=grp_trend)
 pullbackAtrMult = input.float(1.2, "押し目ゾーン幅 (ATR倍)", minval=0.5, maxval=3.0, step=0.1, group=grp_trend,
                      tooltip="EMAからこのATR倍以内に価格が引き付けられたら押し目と判定")
@@ -56,6 +57,7 @@ trendRsiOS      = input.float(45, "ショートRSI下限", minval=30, maxval=60,
 
 // ── レンジモード: ボリンジャーバンド逆張り ────────────────────────────────
 grp_range = "Range Mode (Mean Reversion)"
+useRangeMode    = input.bool(true, "レンジモード有効", group=grp_range)
 bbLen           = input.int(20, "BB 期間", minval=10, maxval=50, group=grp_range)
 bbMult          = input.float(2.0, "BB 偏差倍率", minval=1.0, maxval=3.0, step=0.1, group=grp_range)
 rangeRsiLen     = input.int(14, "RSI 期間 (レンジ)", minval=5, maxval=30, group=grp_range)
@@ -66,17 +68,20 @@ rangeRsiOS      = input.float(30, "RSI 買われ過ぎ判定", minval=10, maxval
 grp_risk = "Risk Management"
 atrLen          = input.int(14, "ATR 期間", minval=5, maxval=50, group=grp_risk)
 initSlAtr       = input.float(2.0, "初期SL (ATR倍)", minval=0.5, maxval=5.0, step=0.1, group=grp_risk)
+useChandelier   = input.bool(true, "シャンデリアストップ有効", group=grp_risk)
 chandelierMult  = input.float(3.0, "シャンデリアストップ (ATR倍)", minval=1.0, maxval=6.0, step=0.1, group=grp_risk,
                      tooltip="トレーリングストップのATR距離")
 partialTpAtr    = input.float(2.5, "部分利確 (ATR倍)", minval=1.0, maxval=5.0, step=0.1, group=grp_risk,
                      tooltip="この利益に達したらポジションの50%を利確")
 usePartialTp    = input.bool(true, "部分利確を有効化", group=grp_risk)
+useDeviationTp  = input.bool(true, "200MA乖離率フィルター有効", group=grp_risk)
 ma200Len        = input.int(200, "200MA 期間", minval=50, maxval=500, group=grp_risk)
 tpDeviationPct  = input.float(10.0, "TP乖離率条件 (%)", minval=1.0, maxval=30.0, step=0.5, group=grp_risk,
                      tooltip="200MAからの乖離率がこの値以上の時のみ部分利確を実行")
 
 // ── ボラティリティ適応 ───────────────────────────────────────────────────
 grp_vol = "Volatility Adaptation"
+useVolAdapt     = input.bool(true, "ボラティリティ適応有効", group=grp_vol)
 atrPctileLen    = input.int(100, "ATRパーセンタイル計測期間", minval=50, maxval=500, group=grp_vol)
 highVolPctile   = input.float(90, "高ボラ閾値 (パーセンタイル)", minval=70, maxval=99, group=grp_vol,
                      tooltip="ATRがこのパーセンタイル以上の時、ストップを引き締める")
@@ -144,7 +149,7 @@ atrRank = ta.percentrank(atrValue, atrPctileLen)
 isHighVol = atrRank >= highVolPctile
 
 // 高ボラ時はシャンデリアストップを引き締める
-adaptiveChandelierMult = isHighVol ? chandelierMult * highVolTighten : chandelierMult
+adaptiveChandelierMult = (useVolAdapt and isHighVol) ? chandelierMult * highVolTighten : chandelierMult
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -153,22 +158,22 @@ adaptiveChandelierMult = isHighVol ? chandelierMult * highVolTighten : chandelie
 
 // ── トレンドモード シグナル ───────────────────────────────────────────────
 // ロング: 上昇トレンド中にEMA付近まで押し目 → 価格がEMAの上に復帰
-trendLongSignal = isTrending and emaSlopeUp and
+trendLongSignal = useTrendMode and isTrending and emaSlopeUp and
                   inPullbackZone and trendRsi < trendRsiOB and
                   close > trendEma and close[1] <= trendEma
 
 // ショート: 下降トレンド中にEMA付近まで戻り → 価格がEMAの下に復帰
-trendShortSignal = isTrending and emaSlopeDown and
+trendShortSignal = useTrendMode and isTrending and emaSlopeDown and
                    inPullbackZone and trendRsi > trendRsiOS and
                    close < trendEma and close[1] >= trendEma
 
 // ── レンジモード シグナル ─────────────────────────────────────────────────
 // ロング: BBロワーバンドタッチ + RSI売られ過ぎ → 翌足陽線で確認
-rangeLongSignal = isRanging and close[1] <= bbLower[1] and rangeRsi[1] < rangeRsiOS and
+rangeLongSignal = useRangeMode and isRanging and close[1] <= bbLower[1] and rangeRsi[1] < rangeRsiOS and
                   close > open  // 確認の陽線
 
 // ショート: BBアッパーバンドタッチ + RSI買われ過ぎ → 翌足陰線で確認
-rangeShortSignal = isRanging and close[1] >= bbUpper[1] and rangeRsi[1] > rangeRsiOB and
+rangeShortSignal = useRangeMode and isRanging and close[1] >= bbUpper[1] and rangeRsi[1] > rangeRsiOB and
                    close < open  // 確認の陰線
 
 // ── 統合シグナル ─────────────────────────────────────────────────────────
@@ -227,15 +232,17 @@ if strategy.position_size > 0  // ── LONG ──
     barsInTrade += 1
 
     // シャンデリアエグジット (適応型)
-    chandelierLevel = ta.highest(high, math.max(1, barsInTrade > atrLen ? atrLen : barsInTrade)) - adaptiveChandelierMult * atrValue
-    trailStop := math.max(nz(trailStop), chandelierLevel)
+    if useChandelier
+        chandelierLevel = ta.highest(high, math.max(1, barsInTrade > atrLen ? atrLen : barsInTrade)) - adaptiveChandelierMult * atrValue
+        trailStop := math.max(nz(trailStop), chandelierLevel)
 
     // ストップは初期SLを下回らない
     trailStop := math.max(trailStop, initialSL)
 
     // 部分利確 (ATR利益 + 200MA乖離率条件)
+    deviationOkLong = useDeviationTp ? deviationPct >= tpDeviationPct : true
     if usePartialTp and not partialTaken
-        if high >= entryPrice + partialTpAtr * entryATR and deviationPct >= tpDeviationPct
+        if high >= entryPrice + partialTpAtr * entryATR and deviationOkLong
             strategy.close("Long", comment="Partial TP", qty_percent=50)
             partialTaken := true
             // 部分利確後、ストップをエントリー価格に引き上げ
@@ -254,15 +261,17 @@ else if strategy.position_size < 0  // ── SHORT ──
     barsInTrade += 1
 
     // シャンデリアエグジット (適応型) - ショート版
-    chandelierLevel = ta.lowest(low, math.max(1, barsInTrade > atrLen ? atrLen : barsInTrade)) + adaptiveChandelierMult * atrValue
-    trailStop := math.min(nz(trailStop, 1e18), chandelierLevel)
+    if useChandelier
+        chandelierLevel = ta.lowest(low, math.max(1, barsInTrade > atrLen ? atrLen : barsInTrade)) + adaptiveChandelierMult * atrValue
+        trailStop := math.min(nz(trailStop, 1e18), chandelierLevel)
 
     // ストップは初期SLを上回らない
     trailStop := math.min(trailStop, initialSL)
 
     // 部分利確 (ATR利益 + 200MA乖離率条件)
+    deviationOkShort = useDeviationTp ? deviationPct <= -tpDeviationPct : true
     if usePartialTp and not partialTaken
-        if low <= entryPrice - partialTpAtr * entryATR and deviationPct <= -tpDeviationPct
+        if low <= entryPrice - partialTpAtr * entryATR and deviationOkShort
             strategy.close("Short", comment="Partial TP", qty_percent=50)
             partialTaken := true
             trailStop := math.min(trailStop, entryPrice)
