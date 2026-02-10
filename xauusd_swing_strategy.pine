@@ -1,0 +1,356 @@
+// XAUUSD Regime-Adaptive Swing Strategy
+// ======================================
+// 独創的コンセプト:
+//   ゴールドは「トレンド相場」と「レンジ相場」を交互に繰り返す。
+//   Kaufman Efficiency Ratio でレジームを自動判定し、
+//   トレンド局面では「EMA押し目買い/戻り売り」、
+//   レンジ局面では「ボリンジャーバンド逆張り」と
+//   エントリーロジックを動的に切り替える。
+//
+//   さらに週足EMAによるマクロ方向フィルター、
+//   ATRパーセンタイルによるボラティリティ適応型ストップ、
+//   進捗なし時の時間ベース強制決済を組み合わせた
+//   ゴールド専用スイングトレード戦略。
+//
+// タイムフレーム: 日足推奨 (4H〜週足でも動作)
+// アセット: XAUUSD
+
+//@version=6
+strategy("XAUUSD Regime-Adaptive Swing", overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=3,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=2,
+     calc_on_every_tick=false)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── マクロトレンドフィルター ─────────────────────────────────────────────
+grp_macro = "Macro Trend Filter"
+useMacroFilter  = input.bool(true, "週足EMAマクロフィルター有効", group=grp_macro)
+macroEmaLen     = input.int(50, "週足EMA期間", minval=10, maxval=200, group=grp_macro)
+
+// ── レジーム判定 ─────────────────────────────────────────────────────────
+grp_regime = "Regime Detection"
+erLen           = input.int(10, "Efficiency Ratio 期間", minval=5, maxval=50, group=grp_regime,
+                     tooltip="Kaufman ER: 高い値=トレンド, 低い値=レンジ")
+erSmooth        = input.int(5, "ER 平滑化期間", minval=1, maxval=20, group=grp_regime)
+erThreshold     = input.float(0.40, "トレンド判定閾値", minval=0.1, maxval=0.9, step=0.05, group=grp_regime,
+                     tooltip="ER がこの値以上ならトレンド相場と判定")
+
+// ── トレンドモード: EMA押し目/戻りエントリー ─────────────────────────────
+grp_trend = "Trend Mode (Pullback)"
+trendEmaLen     = input.int(21, "トレンドEMA期間", minval=10, maxval=100, group=grp_trend)
+pullbackAtrMult = input.float(1.2, "押し目ゾーン幅 (ATR倍)", minval=0.5, maxval=3.0, step=0.1, group=grp_trend,
+                     tooltip="EMAからこのATR倍以内に価格が引き付けられたら押し目と判定")
+trendRsiLen     = input.int(14, "RSI 期間", minval=5, maxval=30, group=grp_trend)
+trendRsiOB      = input.float(55, "ロングRSI上限", minval=40, maxval=70, group=grp_trend,
+                     tooltip="押し目ロング時、RSIがこの値以下で条件成立")
+trendRsiOS      = input.float(45, "ショートRSI下限", minval=30, maxval=60, group=grp_trend,
+                     tooltip="戻りショート時、RSIがこの値以上で条件成立")
+
+// ── レンジモード: ボリンジャーバンド逆張り ────────────────────────────────
+grp_range = "Range Mode (Mean Reversion)"
+bbLen           = input.int(20, "BB 期間", minval=10, maxval=50, group=grp_range)
+bbMult          = input.float(2.0, "BB 偏差倍率", minval=1.0, maxval=3.0, step=0.1, group=grp_range)
+rangeRsiLen     = input.int(14, "RSI 期間 (レンジ)", minval=5, maxval=30, group=grp_range)
+rangeRsiOB      = input.float(70, "RSI 売られ過ぎ判定", minval=60, maxval=90, group=grp_range)
+rangeRsiOS      = input.float(30, "RSI 買われ過ぎ判定", minval=10, maxval=40, group=grp_range)
+
+// ── リスク管理 ───────────────────────────────────────────────────────────
+grp_risk = "Risk Management"
+atrLen          = input.int(14, "ATR 期間", minval=5, maxval=50, group=grp_risk)
+initSlAtr       = input.float(2.0, "初期SL (ATR倍)", minval=0.5, maxval=5.0, step=0.1, group=grp_risk)
+chandelierMult  = input.float(3.0, "シャンデリアストップ (ATR倍)", minval=1.0, maxval=6.0, step=0.1, group=grp_risk,
+                     tooltip="トレーリングストップのATR距離")
+partialTpAtr    = input.float(2.5, "部分利確 (ATR倍)", minval=1.0, maxval=5.0, step=0.1, group=grp_risk,
+                     tooltip="この利益に達したらポジションの50%を利確")
+usePartialTp    = input.bool(true, "部分利確を有効化", group=grp_risk)
+
+// ── ボラティリティ適応 ───────────────────────────────────────────────────
+grp_vol = "Volatility Adaptation"
+atrPctileLen    = input.int(100, "ATRパーセンタイル計測期間", minval=50, maxval=500, group=grp_vol)
+highVolPctile   = input.float(90, "高ボラ閾値 (パーセンタイル)", minval=70, maxval=99, group=grp_vol,
+                     tooltip="ATRがこのパーセンタイル以上の時、ストップを引き締める")
+highVolTighten  = input.float(0.7, "高ボラ時ストップ縮小率", minval=0.3, maxval=1.0, step=0.05, group=grp_vol)
+
+// ── タイムストップ ───────────────────────────────────────────────────────
+grp_time = "Time Stop"
+useTimeStop     = input.bool(true, "タイムストップ有効", group=grp_time)
+maxBarsInTrade  = input.int(30, "最大保有バー数", minval=5, maxval=100, group=grp_time,
+                     tooltip="この期間内に一定以上の利益が出なければ強制決済")
+minProfitAtr    = input.float(0.5, "最低利益 (ATR倍)", minval=0.0, maxval=2.0, step=0.1, group=grp_time,
+                     tooltip="タイムストップ時、この利益未満なら強制決済")
+
+// ── 方向バイアス ─────────────────────────────────────────────────────────
+grp_dir = "Direction"
+longOnly        = input.bool(false, "ロングのみ", group=grp_dir)
+shortOnly       = input.bool(false, "ショートのみ", group=grp_dir)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INDICATOR CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── ATR ──────────────────────────────────────────────────────────────────
+atrValue = ta.atr(atrLen)
+
+// ── Kaufman Efficiency Ratio ─────────────────────────────────────────────
+// ER = |方向の変化| / 経路の合計 → 1に近いほどトレンド的
+erDirection = math.abs(close - close[erLen])
+erVolatility = math.sum(math.abs(close - close[1]), erLen)
+rawER = erVolatility != 0 ? erDirection / erVolatility : 0.0
+smoothER = ta.ema(rawER, erSmooth)
+
+isTrending = smoothER >= erThreshold
+isRanging  = smoothER < erThreshold
+
+// ── 週足マクロトレンド ───────────────────────────────────────────────────
+weeklyEma = request.security(syminfo.tickerid, "W", ta.ema(close, macroEmaLen), lookahead=barmerge.lookahead_off)
+macroLongOk  = useMacroFilter ? close > weeklyEma : true
+macroShortOk = useMacroFilter ? close < weeklyEma : true
+
+// ── トレンドモード指標 ───────────────────────────────────────────────────
+trendEma = ta.ema(close, trendEmaLen)
+trendRsi = ta.rsi(close, trendRsiLen)
+
+// 価格がEMAからATR以内に引き付けられたか
+distFromEma = math.abs(close - trendEma)
+inPullbackZone = distFromEma <= pullbackAtrMult * atrValue
+
+// EMAの傾き（トレンド方向判定）
+emaSlopeUp   = trendEma > trendEma[3]
+emaSlopeDown = trendEma < trendEma[3]
+
+// ── レンジモード指標 ─────────────────────────────────────────────────────
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, bbLen, bbMult)
+rangeRsi = ta.rsi(close, rangeRsiLen)
+
+// ── ATR パーセンタイル ───────────────────────────────────────────────────
+// ATRの現在位置を過去N期間の中でランク付け
+atrRank = ta.percentrank(atrValue, atrPctileLen)
+isHighVol = atrRank >= highVolPctile
+
+// 高ボラ時はシャンデリアストップを引き締める
+adaptiveChandelierMult = isHighVol ? chandelierMult * highVolTighten : chandelierMult
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL GENERATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── トレンドモード シグナル ───────────────────────────────────────────────
+// ロング: 上昇トレンド中にEMA付近まで押し目 → 価格がEMAの上に復帰
+trendLongSignal = isTrending and emaSlopeUp and
+                  inPullbackZone and trendRsi < trendRsiOB and
+                  close > trendEma and close[1] <= trendEma
+
+// ショート: 下降トレンド中にEMA付近まで戻り → 価格がEMAの下に復帰
+trendShortSignal = isTrending and emaSlopeDown and
+                   inPullbackZone and trendRsi > trendRsiOS and
+                   close < trendEma and close[1] >= trendEma
+
+// ── レンジモード シグナル ─────────────────────────────────────────────────
+// ロング: BBロワーバンドタッチ + RSI売られ過ぎ → 翌足陽線で確認
+rangeLongSignal = isRanging and close[1] <= bbLower[1] and rangeRsi[1] < rangeRsiOS and
+                  close > open  // 確認の陽線
+
+// ショート: BBアッパーバンドタッチ + RSI買われ過ぎ → 翌足陰線で確認
+rangeShortSignal = isRanging and close[1] >= bbUpper[1] and rangeRsi[1] > rangeRsiOB and
+                   close < open  // 確認の陰線
+
+// ── 統合シグナル ─────────────────────────────────────────────────────────
+longSignal  = (trendLongSignal or rangeLongSignal) and macroLongOk and not shortOnly
+shortSignal = (trendShortSignal or rangeShortSignal) and macroShortOk and not longOnly
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE VARIABLES
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entryPrice       = na
+var float initialSL        = na
+var float trailStop        = na
+var float entryATR         = na
+var int   barsInTrade      = 0
+var bool  partialTaken     = false
+var bool  isTrendEntry     = false  // エントリーがトレンドモードだったか
+var string entryMode       = ""
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+canEnter = strategy.position_size == 0 and not na(atrValue) and atrValue > 0
+
+if canEnter and longSignal
+    entryPrice   := close
+    initialSL    := close - initSlAtr * atrValue
+    trailStop    := initialSL
+    entryATR     := atrValue
+    barsInTrade  := 0
+    partialTaken := false
+    isTrendEntry := isTrending
+    entryMode    := isTrending ? "Trend" : "Range"
+    strategy.entry("Long", strategy.long)
+
+if canEnter and shortSignal
+    entryPrice   := close
+    initialSL    := close + initSlAtr * atrValue
+    trailStop    := initialSL
+    entryATR     := atrValue
+    barsInTrade  := 0
+    partialTaken := false
+    isTrendEntry := isTrending
+    entryMode    := isTrending ? "Trend" : "Range"
+    strategy.entry("Short", strategy.short)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size > 0  // ── LONG ──
+    barsInTrade += 1
+
+    // シャンデリアエグジット (適応型)
+    chandelierLevel = ta.highest(high, math.max(1, barsInTrade > atrLen ? atrLen : barsInTrade)) - adaptiveChandelierMult * atrValue
+    trailStop := math.max(nz(trailStop), chandelierLevel)
+
+    // ストップは初期SLを下回らない
+    trailStop := math.max(trailStop, initialSL)
+
+    // 部分利確
+    if usePartialTp and not partialTaken
+        if high >= entryPrice + partialTpAtr * entryATR
+            strategy.close("Long", comment="Partial TP", qty_percent=50)
+            partialTaken := true
+            // 部分利確後、ストップをエントリー価格に引き上げ
+            trailStop := math.max(trailStop, entryPrice)
+
+    // タイムストップ
+    if useTimeStop and barsInTrade >= maxBarsInTrade
+        currentProfit = close - entryPrice
+        if currentProfit < minProfitAtr * entryATR
+            strategy.close("Long", comment="Time Stop")
+
+    // 通常のストップロス
+    strategy.exit("Exit Long", "Long", stop=trailStop)
+
+else if strategy.position_size < 0  // ── SHORT ──
+    barsInTrade += 1
+
+    // シャンデリアエグジット (適応型) - ショート版
+    chandelierLevel = ta.lowest(low, math.max(1, barsInTrade > atrLen ? atrLen : barsInTrade)) + adaptiveChandelierMult * atrValue
+    trailStop := math.min(nz(trailStop, 1e18), chandelierLevel)
+
+    // ストップは初期SLを上回らない
+    trailStop := math.min(trailStop, initialSL)
+
+    // 部分利確
+    if usePartialTp and not partialTaken
+        if low <= entryPrice - partialTpAtr * entryATR
+            strategy.close("Short", comment="Partial TP", qty_percent=50)
+            partialTaken := true
+            trailStop := math.min(trailStop, entryPrice)
+
+    // タイムストップ
+    if useTimeStop and barsInTrade >= maxBarsInTrade
+        currentProfit = entryPrice - close
+        if currentProfit < minProfitAtr * entryATR
+            strategy.close("Short", comment="Time Stop")
+
+    // 通常のストップロス
+    strategy.exit("Exit Short", "Short", stop=trailStop)
+
+else
+    // ポジションなし → カウンターリセット
+    barsInTrade := 0
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── レジーム表示 (背景色) ────────────────────────────────────────────────
+regimeColor = isTrending ? color.new(color.blue, 92) : color.new(color.purple, 92)
+bgcolor(regimeColor, title="Regime Background")
+
+// ── トレンドEMA ──────────────────────────────────────────────────────────
+plot(trendEma, "Trend EMA", color=color.new(color.yellow, 20), linewidth=2)
+
+// ── 週足EMA ──────────────────────────────────────────────────────────────
+plot(useMacroFilter ? weeklyEma : na, "Weekly EMA", color=color.orange, linewidth=3, style=plot.style_stepline)
+
+// ── ボリンジャーバンド (レンジモード時のみ強調) ──────────────────────────
+bbAlpha = isRanging ? 40 : 85
+plot(bbUpper, "BB Upper", color=color.new(color.teal, bbAlpha), linewidth=1)
+plot(bbMiddle, "BB Middle", color=color.new(color.gray, bbAlpha), linewidth=1, style=plot.style_cross)
+plot(bbLower, "BB Lower", color=color.new(color.teal, bbAlpha), linewidth=1)
+
+// ── トレーリングストップ ─────────────────────────────────────────────────
+slColor = strategy.position_size > 0 ? color.new(color.red, 20) :
+          strategy.position_size < 0 ? color.new(color.red, 20) : na
+plot(strategy.position_size != 0 ? trailStop : na, "Trailing Stop",
+     color=slColor, linewidth=2, style=plot.style_steplinebr)
+
+// ── エントリーシグナル ───────────────────────────────────────────────────
+plotshape(canEnter and trendLongSignal and macroLongOk and not shortOnly,
+          "Trend Long", shape.triangleup, location.belowbar, color.lime, size=size.small,
+          text="T↑")
+plotshape(canEnter and trendShortSignal and macroShortOk and not longOnly,
+          "Trend Short", shape.triangledown, location.abovebar, color.red, size=size.small,
+          text="T↓")
+plotshape(canEnter and rangeLongSignal and macroLongOk and not shortOnly,
+          "Range Long", shape.triangleup, location.belowbar, color.aqua, size=size.small,
+          text="R↑")
+plotshape(canEnter and rangeShortSignal and macroShortOk and not longOnly,
+          "Range Short", shape.triangledown, location.abovebar, color.fuchsia, size=size.small,
+          text="R↓")
+
+// ── Efficiency Ratio パネル ──────────────────────────────────────────────
+plot(smoothER * 100, "Efficiency Ratio", color=color.new(color.white, 30),
+     linewidth=2, display=display.pane)
+hline(erThreshold * 100, "ER Threshold", color=color.new(color.yellow, 50),
+     linestyle=hline.style_dashed, display=display.pane)
+
+// ── ATR パーセンタイル パネル ────────────────────────────────────────────
+plot(atrRank, "ATR Percentile", color=color.new(color.orange, 30),
+     linewidth=1, display=display.pane)
+hline(highVolPctile, "High Vol Threshold", color=color.new(color.red, 50),
+     linestyle=hline.style_dotted, display=display.pane)
+
+// ── レジームラベル (直近のみ) ────────────────────────────────────────────
+var label regimeLabel = na
+if barstate.islast
+    label.delete(regimeLabel)
+    regimeText = isTrending ? "TREND MODE (ER: " + str.tostring(smoothER, "#.##") + ")" :
+                              "RANGE MODE (ER: " + str.tostring(smoothER, "#.##") + ")"
+    regimeLabel := label.new(bar_index + 3, close, regimeText,
+                    color=isTrending ? color.blue : color.purple,
+                    textcolor=color.white, style=label.style_label_left, size=size.normal)
+
+// ── ポジション情報テーブル ───────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80),
+                     border_width=1, border_color=color.gray)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Regime", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, isTrending ? "TREND" : "RANGE",
+               text_color=isTrending ? color.lime : color.aqua, text_size=size.small)
+    table.cell(infoTable, 0, 1, "ER", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(smoothER, "#.###"), text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 0, 2, "ATR %ile", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(atrRank, "#.#") + "%",
+               text_color=isHighVol ? color.red : color.green, text_size=size.small)
+    table.cell(infoTable, 0, 3, "Macro", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, close > weeklyEma ? "BULLISH" : "BEARISH",
+               text_color=close > weeklyEma ? color.lime : color.red, text_size=size.small)
+    table.cell(infoTable, 0, 4, "Bars Held", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, strategy.position_size != 0 ? str.tostring(barsInTrade) : "—",
+               text_color=color.white, text_size=size.small)
