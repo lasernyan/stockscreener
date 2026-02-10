@@ -1,0 +1,163 @@
+//@version=5
+strategy("Ichimoku Sanyaku Koutien + Bollinger Bands", overlay=true,
+     initial_capital=1000000, default_qty_type=strategy.cash, default_qty_value=1000000,
+     currency=currency.JPY, slippage=3, commission_type=strategy.commission.percent,
+     commission_value=0.05, calc_on_every_tick=false)
+
+// --- Inputs ---
+// Ichimoku
+grp_ichi = "Ichimoku Settings"
+conversionPeriods = input.int(9, minval=1, title="Conversion Line Length (Tenkan)", group=grp_ichi)
+basePeriods      = input.int(26, minval=1, title="Base Line Length (Kijun)", group=grp_ichi)
+laggingSpan2Periods = input.int(52, minval=1, title="Leading Span B Length", group=grp_ichi)
+displacement     = input.int(26, minval=1, title="Displacement (Shift)", group=grp_ichi)
+
+// Bollinger Bands
+grp_bb   = "Bollinger Bands Settings"
+bbLength = input.int(20, minval=1, title="BB Length", group=grp_bb)
+bbMult   = input.float(2.0, minval=0.001, maxval=50, title="BB StdDev", group=grp_bb)
+
+// Risk Management
+grp_risk = "Risk Management"
+useStopLoss    = input.bool(true, title="Use Stop Loss", group=grp_risk)
+atrLen         = input.int(14, minval=1, title="ATR Length", group=grp_risk)
+atrSlMult      = input.float(2.0, minval=0.1, title="ATR Stop Loss Multiplier", group=grp_risk)
+useTrailingStop = input.bool(true, title="Use Trailing Stop", group=grp_risk)
+atrTslMult     = input.float(1.5, minval=0.1, title="ATR Trailing Stop Multiplier", group=grp_risk)
+useBBMiddleExit = input.bool(true, title="Exit on BB Middle Cross", group=grp_risk)
+
+// Filters
+grp_filter = "Filters"
+requireVolConfirm = input.bool(false, title="Require Volume Confirmation", group=grp_filter)
+volMultiplier     = input.float(1.5, minval=1.0, title="Volume Multiplier (vs 20 SMA)", group=grp_filter)
+requireBBConfirm  = input.bool(false, title="Require 2-bar BB Breakout Confirmation", group=grp_filter)
+enableShort       = input.bool(false, title="Enable Short Entries", group=grp_filter)
+
+// --- Calculations ---
+// Ichimoku
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine       = donchian(basePeriods)
+leadLine1      = math.avg(conversionLine, baseLine)
+leadLine2      = donchian(laggingSpan2Periods)
+
+// Bollinger Bands
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, bbLength, bbMult)
+
+// ATR for stop loss
+atrVal = ta.atr(atrLen)
+
+// --- Ichimoku Conditions ---
+// Condition 1: Tenkan-Kijun Cross
+tk_bull = conversionLine > baseLine
+tk_bear = conversionLine < baseLine
+
+// Condition 2: Price vs Cloud (using displaced span values)
+// leadLine1[displacement-1] retrieves the Span A value calculated 26 bars ago,
+// which corresponds to the cloud plotted at the current bar position.
+spanA_current = leadLine1[displacement - 1]
+spanB_current = leadLine2[displacement - 1]
+cloud_top     = math.max(spanA_current, spanB_current)
+cloud_bottom  = math.min(spanA_current, spanB_current)
+price_above_cloud = close > cloud_top
+price_below_cloud = close < cloud_bottom
+
+// Condition 3: Chikou Span (Lagging Span)
+// The Chikou Span is the current close plotted 26 bars back.
+// Bullish: current close is above the close from 26 bars ago (i.e., Chikou is above past price).
+chikouAbovePast = close > close[displacement - 1]
+chikouBelowPast = close < close[displacement - 1]
+
+// --- Bollinger Bands Conditions ---
+// Volume filter (optional)
+volSma       = ta.sma(volume, 20)
+volConfirmed = not requireVolConfirm or (volume > volSma * volMultiplier)
+
+// BB breakout with optional 2-bar confirmation
+bb_bull_single = close > bbUpper
+bb_bear_single = close < bbLower
+bb_bull = requireBBConfirm ? (bb_bull_single and close[1] > bbUpper[1]) : bb_bull_single
+bb_bear = requireBBConfirm ? (bb_bear_single and close[1] < bbLower[1]) : bb_bear_single
+
+// --- Entry Signals ---
+sanyakuBull = tk_bull and price_above_cloud and chikouAbovePast
+sanyakuBear = tk_bear and price_below_cloud and chikouBelowPast
+
+longCondition  = sanyakuBull and bb_bull and volConfirmed
+shortCondition = sanyakuBear and bb_bear and volConfirmed
+
+notInPosition = strategy.position_size == 0
+inLong        = strategy.position_size > 0
+inShort       = strategy.position_size < 0
+
+// --- Execution ---
+// Long Entry
+if (longCondition and not inLong)
+    strategy.entry("Long", strategy.long)
+    if (useStopLoss)
+        slPrice = close - atrVal * atrSlMult
+        if (useTrailingStop)
+            strategy.exit("Long Exit", "Long", stop=slPrice,
+                 trail_points=atrVal * atrTslMult / syminfo.mintick,
+                 trail_offset=atrVal * atrTslMult / syminfo.mintick)
+        else
+            strategy.exit("Long SL", "Long", stop=slPrice)
+
+// Short Entry (optional)
+if (enableShort and shortCondition and not inShort)
+    strategy.entry("Short", strategy.short)
+    if (useStopLoss)
+        slPrice = close + atrVal * atrSlMult
+        if (useTrailingStop)
+            strategy.exit("Short Exit", "Short", stop=slPrice,
+                 trail_points=atrVal * atrTslMult / syminfo.mintick,
+                 trail_offset=atrVal * atrTslMult / syminfo.mintick)
+        else
+            strategy.exit("Short SL", "Short", stop=slPrice)
+
+// --- Exit Logic ---
+// Exit 1: Opposite signal (Ichimoku reversal)
+if (shortCondition and inLong)
+    strategy.close("Long", comment="Sanyaku Gyakuten")
+if (enableShort and longCondition and inShort)
+    strategy.close("Short", comment="Sanyaku Koutien")
+
+// Exit 2: Partial exit on TK cross against position
+if (tk_bear and inLong)
+    strategy.close("Long", comment="TK Bear Cross", qty_percent=50)
+if (enableShort and tk_bull and inShort)
+    strategy.close("Short", comment="TK Bull Cross", qty_percent=50)
+
+// Exit 3: BB Middle Band reversion exit
+if (useBBMiddleExit and inLong and close < bbMiddle)
+    strategy.close("Long", comment="BB Mean Reversion")
+if (useBBMiddleExit and enableShort and inShort and close > bbMiddle)
+    strategy.close("Short", comment="BB Mean Reversion")
+
+// --- Plotting ---
+// Ichimoku
+plot(conversionLine, color=color.new(color.blue, 0), title="Tenkan")
+plot(baseLine, color=color.new(color.red, 0), title="Kijun")
+plot(close, offset=-displacement + 1, color=color.new(color.green, 0), title="Chikou Span")
+p1 = plot(leadLine1, offset=displacement - 1, color=color.new(color.green, 0), title="Span A")
+p2 = plot(leadLine2, offset=displacement - 1, color=color.new(color.red, 0), title="Span B")
+fill(p1, p2, color=leadLine1 > leadLine2 ? color.new(color.green, 90) : color.new(color.red, 90), title="Cloud")
+
+// Bollinger Bands
+plot(bbUpper, color=color.new(color.teal, 0), title="BB Upper")
+plot(bbLower, color=color.new(color.teal, 0), title="BB Lower")
+plot(bbMiddle, color=color.new(color.orange, 0), title="BB Basis")
+
+// Stop Loss reference line
+plot(useStopLoss and inLong ? close - atrVal * atrSlMult : na,
+     color=color.new(color.red, 50), style=plot.style_cross, title="Long SL Level")
+plot(useStopLoss and enableShort and inShort ? close + atrVal * atrSlMult : na,
+     color=color.new(color.red, 50), style=plot.style_cross, title="Short SL Level")
+
+// Background highlight on entry signals
+bgcolor(longCondition ? color.new(color.green, 90) : na, title="Long Signal BG")
+bgcolor(shortCondition ? color.new(color.red, 90) : na, title="Short Signal BG")
+
+// --- Alerts ---
+alertcondition(longCondition, title="Long Entry", message="Ichimoku Sanyaku Koutien + BB Upper Breakout: Long Entry")
+alertcondition(shortCondition, title="Short Entry", message="Ichimoku Sanyaku Gyakuten + BB Lower Breakout: Short Entry")
