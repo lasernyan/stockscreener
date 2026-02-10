@@ -155,23 +155,15 @@ boBaseShort = close < lowerChannel
 boLongStrength  = boBaseLong  ? (close - upperChannel) / atrValue : 0.0
 boShortStrength = boBaseShort ? (lowerChannel - close) / atrValue : 0.0
 
-boLongSignal  = useBreakoutEngine and boBaseLong  and boLongStrength > boMomentumThresh
-                and adxOk and inSession
-boShortSignal = useBreakoutEngine and boBaseShort and boShortStrength > boMomentumThresh
-                and adxOk and inSession and not longOnly
+boLongSignal  = useBreakoutEngine and boBaseLong and boLongStrength > boMomentumThresh and adxOk and inSession
+boShortSignal = useBreakoutEngine and boBaseShort and boShortStrength > boMomentumThresh and adxOk and inSession and not longOnly
 
 // ── Trend-Follow signals ─────────────────────────────────────────────────
 // Long: stable uptrend + pullback to fast EMA + bounce + price above slow EMA
-tfLongSignal  = useTrendFollowEngine and trendUpEstablished
-                and longPullback and longBounce
-                and close > emaSlow
-                and adxOk and inSession
+tfLongSignal  = useTrendFollowEngine and trendUpEstablished and longPullback and longBounce and close > emaSlow and adxOk and inSession
 
 // Short: stable downtrend + pullback to fast EMA + bounce down + price below slow EMA
-tfShortSignal = useTrendFollowEngine and trendDownEstablished
-                and shortPullback and shortBounce
-                and close < emaSlow
-                and adxOk and inSession and not longOnly
+tfShortSignal = useTrendFollowEngine and trendDownEstablished and shortPullback and shortBounce and close < emaSlow and adxOk and inSession and not longOnly
 
 
 // ┌─────────────────────────────────────────────────────────────────────────┐
@@ -318,11 +310,7 @@ tfQty = tfSlDist > 0 ? tfRiskAmt / tfSlDist : 0
 // │                  ENTRY LOGIC — BREAKOUT ENGINE                          │
 // └─────────────────────────────────────────────────────────────────────────┘
 
-boCanEnter = not boHasPosition
-             and boCooldown == 0
-             and not na(atrValue) and atrValue > 0
-             and not dailyLossLimitHit
-             and boQty > 0
+boCanEnter = not boHasPosition and boCooldown == 0 and not na(atrValue) and atrValue > 0 and not dailyLossLimitHit and boQty > 0
 
 if boCanEnter and boLongSignal
     boEntryPrice  := close
@@ -351,11 +339,7 @@ if boCanEnter and boShortSignal
 // │                ENTRY LOGIC — TREND-FOLLOW ENGINE                        │
 // └─────────────────────────────────────────────────────────────────────────┘
 
-tfCanEnter = not tfHasPosition
-             and tfCooldown == 0
-             and not na(atrValue) and atrValue > 0
-             and not dailyLossLimitHit
-             and tfQty > 0
+tfCanEnter = not tfHasPosition and tfCooldown == 0 and not na(atrValue) and atrValue > 0 and not dailyLossLimitHit and tfQty > 0
 
 if tfCanEnter and tfLongSignal
     tfEntryPrice  := close
