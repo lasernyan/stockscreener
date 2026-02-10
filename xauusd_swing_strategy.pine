@@ -317,14 +317,14 @@ plotshape(canEnter and rangeShortSignal and macroShortOk and not longOnly,
 // ── Efficiency Ratio パネル ──────────────────────────────────────────────
 plot(smoothER * 100, "Efficiency Ratio", color=color.new(color.white, 30),
      linewidth=2, display=display.pane)
-hline(erThreshold * 100, "ER Threshold", color=color.new(color.yellow, 50),
-     linestyle=hline.style_dashed, display=display.pane)
+plot(erThreshold * 100, "ER Threshold", color=color.new(color.yellow, 50),
+     style=plot.style_line, linewidth=1, display=display.pane)
 
 // ── ATR パーセンタイル パネル ────────────────────────────────────────────
 plot(atrRank, "ATR Percentile", color=color.new(color.orange, 30),
      linewidth=1, display=display.pane)
-hline(highVolPctile, "High Vol Threshold", color=color.new(color.red, 50),
-     linestyle=hline.style_dotted, display=display.pane)
+plot(highVolPctile, "High Vol Threshold", color=color.new(color.red, 50),
+     style=plot.style_line, linewidth=1, display=display.pane)
 
 // ── レジームラベル (直近のみ) ────────────────────────────────────────────
 var label regimeLabel = na
