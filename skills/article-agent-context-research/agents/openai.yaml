@@ -1,0 +1,4 @@
+interface:
+  display_name: "周辺リサーチ"
+  short_description: "記事を書く前に、周辺情報をWeb等から集めて論点/反論/一次情報を揃える"
+  default_prompt: "$article-agent-context-research を使って、まず「何を調べるか」を確認し、Grokに委任（x_search）してContext Packを作って（data/context-researchに保存）。"

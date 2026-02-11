@@ -1,0 +1,11 @@
+{
+  "name": "desktop-tutorial",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "grok:context": "tsx scripts/grok_context_research.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}
