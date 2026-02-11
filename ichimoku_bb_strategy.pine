@@ -21,10 +21,11 @@ atrTslMult      = input.float(1.5, minval=0.1, title="ATR Trailing Stop Multipli
 useBBMiddleExit = input.bool(true, title="Exit on BB Middle Cross", group="Risk Management")
 
 // Filters
-requireVolConfirm = input.bool(false, title="Require Volume Confirmation", group="Filters")
-volMultiplier     = input.float(1.5, minval=1.0, title="Volume Multiplier (vs 20 SMA)", group="Filters")
-requireBBConfirm  = input.bool(false, title="Require 2-bar BB Breakout Confirmation", group="Filters")
-enableShort       = input.bool(false, title="Enable Short Entries", group="Filters")
+requireVolConfirm    = input.bool(false, title="Require Volume Confirmation", group="Filters")
+volMultiplier        = input.float(1.5, minval=1.0, title="Volume Multiplier (vs 20 SMA)", group="Filters")
+requireBBConfirm     = input.bool(false, title="Require 2-bar BB Breakout Confirmation", group="Filters")
+requireReversalPattern = input.bool(true, title="Require Reversal Candlestick Pattern", group="Filters")
+enableShort          = input.bool(false, title="Enable Short Entries", group="Filters")
 
 // --- Calculations ---
 // Ichimoku
@@ -72,12 +73,38 @@ bb_bear_single = close < bbLower
 bb_bull = requireBBConfirm ? (bb_bull_single and close[1] > bbUpper[1]) : bb_bull_single
 bb_bear = requireBBConfirm ? (bb_bear_single and close[1] < bbLower[1]) : bb_bear_single
 
+// --- Reversal Candlestick Patterns ---
+bodySize = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+avgBody = ta.sma(bodySize, 14)
+
+// Bullish Reversal Patterns
+bullishEngulfing = close[1] < open[1] and close > open and open <= close[1] and close >= open[1] and bodySize > bodySize[1]
+hammer = close > open and lowerWick > bodySize * 2 and upperWick < bodySize * 0.5 and close[1] < open[1]
+morningStar = close[2] < open[2] and bodySize[1] < avgBody * 0.5 and close > open and close > (open[2] + close[2]) / 2
+piercingLine = close[1] < open[1] and close > open and open < close[1] and close > (open[1] + close[1]) / 2 and close < open[1]
+
+bullishReversal = bullishEngulfing or hammer or morningStar or piercingLine
+
+// Bearish Reversal Patterns
+bearishEngulfing = close[1] > open[1] and close < open and open >= close[1] and close <= open[1] and bodySize > bodySize[1]
+shootingStar = close < open and upperWick > bodySize * 2 and lowerWick < bodySize * 0.5 and close[1] > open[1]
+eveningStar = close[2] > open[2] and bodySize[1] < avgBody * 0.5 and close < open and close < (open[2] + close[2]) / 2
+darkCloudCover = close[1] > open[1] and close < open and open > close[1] and close < (open[1] + close[1]) / 2 and close > open[1]
+
+bearishReversal = bearishEngulfing or shootingStar or eveningStar or darkCloudCover
+
+// Reversal filter (bypass if disabled)
+bullReversalOk = not requireReversalPattern or bullishReversal
+bearReversalOk = not requireReversalPattern or bearishReversal
+
 // --- Entry Signals ---
 sanyakuBull = tk_bull and price_above_cloud and chikouAbovePast
 sanyakuBear = tk_bear and price_below_cloud and chikouBelowPast
 
-longCondition  = sanyakuBull and bb_bull and volConfirmed
-shortCondition = sanyakuBear and bb_bear and volConfirmed
+longCondition  = sanyakuBull and bb_bull and volConfirmed and bullReversalOk
+shortCondition = sanyakuBear and bb_bear and volConfirmed and bearReversalOk
 
 notInPosition = strategy.position_size == 0
 inLong        = strategy.position_size > 0
@@ -150,6 +177,10 @@ plot(useStopLoss and enableShort and inShort ? close + atrVal * atrSlMult : na,
 // Background highlight on entry signals
 bgcolor(longCondition ? color.new(color.green, 90) : na, title="Long Signal BG")
 bgcolor(shortCondition ? color.new(color.red, 90) : na, title="Short Signal BG")
+
+// Reversal pattern markers
+plotshape(requireReversalPattern and bullishReversal, title="Bullish Reversal", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny)
+plotshape(requireReversalPattern and bearishReversal, title="Bearish Reversal", style=shape.triangledown, location=location.abovebar, color=color.new(color.fuchsia, 0), size=size.tiny)
 
 // --- Alerts ---
 alertcondition(longCondition, title="Long Entry", message="Ichimoku Sanyaku Koutien + BB Upper Breakout: Long Entry")
