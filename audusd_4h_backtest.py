@@ -40,16 +40,17 @@ LOT_SIZE = 100_000                 # Standard forex lot (for PnL calculation in 
 EMA_FAST = 20                      # Fast EMA period (4H bars)
 EMA_SLOW = 50                      # Slow EMA period (4H bars)
 
-# ── RSI Filter ─────────────────────────────────────────────────────────────
+# ── RSI Filter (Improvement #4: tighter thresholds) ───────────────────────
 RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
+RSI_LONG_MAX = 55                  # Longs only when RSI < 55 (was 70)
+RSI_SHORT_MIN = 45                 # Shorts only when RSI > 45 (was 30)
 USE_RSI_FILTER = True
 
 # ── Bollinger Bands ────────────────────────────────────────────────────────
 BB_PERIOD = 20
 BB_STD = 2.0
 USE_BB_ENTRY = True                # Use BB touch as entry trigger
+USE_BB_BOUNCE = True               # Improvement #1: require bounce confirmation
 
 # ── ATR Stop/Target ───────────────────────────────────────────────────────
 ATR_PERIOD = 14
@@ -59,11 +60,11 @@ ATR_TP_MULTIPLIER = 3.0
 # ── Trailing Stop ──────────────────────────────────────────────────────────
 USE_TRAILING_STOP = True
 TRAIL_ACTIVATION_ATR = 1.5         # Activate after 1.5x ATR move
-TRAIL_DISTANCE_ATR = 1.0           # Trail 1x ATR behind best price
+TRAIL_DISTANCE_ATR = 2.0           # Improvement #3: trail 2x ATR (was 1.0)
 
 # ── Breakeven Stop ─────────────────────────────────────────────────────────
 USE_BREAKEVEN_STOP = True
-BREAKEVEN_ATR = 1.0                # Move SL to entry after 1x ATR move
+BREAKEVEN_ATR = 2.0                # Improvement #2: relaxed (was 1.0)
 
 # ── Cooldown ───────────────────────────────────────────────────────────────
 COOLDOWN_BARS = 3                  # Wait 3 bars (12 hours) after SL hit
@@ -76,6 +77,21 @@ USE_ADX_FILTER = True
 # ── 200 EMA Trend Filter ──────────────────────────────────────────────────
 TREND_MA_PERIOD = 200
 USE_TREND_FILTER = True
+
+# ── Improvement #5: MACD Histogram Confirmation ─────────────────────────
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+USE_MACD_FILTER = True             # Require MACD histogram direction match
+
+# ── Improvement #6: ATR Minimum Threshold ────────────────────────────────
+USE_ATR_FILTER = True              # Skip trades in low-volatility squeeze
+ATR_PERCENTILE_MIN = 25            # ATR must be above 25th percentile
+
+# ── Improvement #7: Partial Position Close ───────────────────────────────
+USE_PARTIAL_CLOSE = True           # Close 50% at 1.5x ATR, trail remainder
+PARTIAL_CLOSE_ATR = 1.5            # ATR multiple to trigger partial close
+PARTIAL_CLOSE_PCT = 0.5            # Close 50% of position
 
 
 def generate_synthetic_audusd_data(start: str, end: str) -> pd.DataFrame:
@@ -209,17 +225,35 @@ def compute_signals(df: pd.DataFrame) -> pd.DataFrame:
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
     df["ADX"] = dx.ewm(alpha=alpha, min_periods=ADX_PERIOD).mean()
 
+    # ── MACD (Improvement #5) ──
+    ema_macd_fast = df["Close"].ewm(span=MACD_FAST, adjust=False).mean()
+    ema_macd_slow = df["Close"].ewm(span=MACD_SLOW, adjust=False).mean()
+    df["MACD_Line"] = ema_macd_fast - ema_macd_slow
+    df["MACD_Signal"] = df["MACD_Line"].ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df["MACD_Hist"] = df["MACD_Line"] - df["MACD_Signal"]
+
+    # ── ATR percentile threshold (Improvement #6) ──
+    df["ATR_Threshold"] = df["ATR"].rolling(window=200, min_periods=50).quantile(
+        ATR_PERCENTILE_MIN / 100.0)
+
     # ── Entry Signals ──
-    # Long: EMA fast > EMA slow, price near/below lower BB, RSI not overbought
-    # Short: EMA fast < EMA slow, price near/above upper BB, RSI not oversold
     uptrend = df["Trend"] == 1
     downtrend = df["Trend"] == -1
 
     if USE_BB_ENTRY:
-        long_entry_trigger = df["Low"] <= df["BB_Lower"]
-        short_entry_trigger = df["High"] >= df["BB_Upper"]
+        if USE_BB_BOUNCE:
+            # Improvement #1: prev bar touched BB, current bar closed back inside
+            prev_touched_lower = df["Low"].shift(1) <= df["BB_Lower"].shift(1)
+            bounced_up = df["Close"] > df["BB_Lower"]
+            long_entry_trigger = prev_touched_lower & bounced_up
+
+            prev_touched_upper = df["High"].shift(1) >= df["BB_Upper"].shift(1)
+            bounced_down = df["Close"] < df["BB_Upper"]
+            short_entry_trigger = prev_touched_upper & bounced_down
+        else:
+            long_entry_trigger = df["Low"] <= df["BB_Lower"]
+            short_entry_trigger = df["High"] >= df["BB_Upper"]
     else:
-        # Simple EMA crossover: cross happened on this bar
         long_entry_trigger = (df["EMA_Fast"] > df["EMA_Slow"]) & (
             df["EMA_Fast"].shift(1) <= df["EMA_Slow"].shift(1))
         short_entry_trigger = (df["EMA_Fast"] < df["EMA_Slow"]) & (
@@ -228,10 +262,10 @@ def compute_signals(df: pd.DataFrame) -> pd.DataFrame:
     long_signal = uptrend & long_entry_trigger
     short_signal = downtrend & short_entry_trigger
 
-    # RSI filter
+    # RSI filter (Improvement #4: tighter thresholds)
     if USE_RSI_FILTER:
-        long_signal = long_signal & (df["RSI"] < RSI_OVERBOUGHT)
-        short_signal = short_signal & (df["RSI"] > RSI_OVERSOLD)
+        long_signal = long_signal & (df["RSI"] < RSI_LONG_MAX)
+        short_signal = short_signal & (df["RSI"] > RSI_SHORT_MIN)
 
     # 200 EMA trend filter
     if USE_TREND_FILTER:
@@ -243,6 +277,20 @@ def compute_signals(df: pd.DataFrame) -> pd.DataFrame:
         trending = df["ADX"] > ADX_THRESHOLD
         long_signal = long_signal & trending
         short_signal = short_signal & trending
+
+    # MACD histogram filter (Improvement #5)
+    # Require histogram direction match OR histogram momentum (rising/falling)
+    if USE_MACD_FILTER:
+        macd_bullish = (df["MACD_Hist"] > 0) | (df["MACD_Hist"] > df["MACD_Hist"].shift(1))
+        macd_bearish = (df["MACD_Hist"] < 0) | (df["MACD_Hist"] < df["MACD_Hist"].shift(1))
+        long_signal = long_signal & macd_bullish
+        short_signal = short_signal & macd_bearish
+
+    # ATR volatility filter (Improvement #6)
+    if USE_ATR_FILTER:
+        sufficient_vol = df["ATR"] > df["ATR_Threshold"]
+        long_signal = long_signal & sufficient_vol
+        short_signal = short_signal & sufficient_vol
 
     df["Long_Signal"] = long_signal
     df["Short_Signal"] = short_signal
@@ -264,6 +312,7 @@ def run_backtest(df: pd.DataFrame) -> tuple:
     # Trailing / breakeven state
     trailing_active = False
     breakeven_hit = False
+    partial_closed = False
     best_price = 0.0
     trail_atr = 0.0
 
@@ -279,6 +328,17 @@ def run_backtest(df: pd.DataFrame) -> tuple:
             if position == 1:
                 if row["High"] > best_price:
                     best_price = row["High"]
+
+                # Improvement #7: Partial close at 1.5x ATR
+                if USE_PARTIAL_CLOSE and not partial_closed:
+                    if best_price >= entry_price + PARTIAL_CLOSE_ATR * trail_atr:
+                        close_lots = round(trades[-1]["lots"] * PARTIAL_CLOSE_PCT, 2)
+                        partial_pips = PARTIAL_CLOSE_ATR * trail_atr * 10_000
+                        partial_dollar = partial_pips * (LOT_SIZE / 10_000) * close_lots
+                        capital += partial_dollar
+                        trades[-1]["lots"] = round(trades[-1]["lots"] - close_lots, 2)
+                        trades[-1]["partial_pnl"] = partial_dollar
+                        partial_closed = True
 
                 # Breakeven
                 if USE_BREAKEVEN_STOP and not breakeven_hit:
@@ -298,11 +358,14 @@ def run_backtest(df: pd.DataFrame) -> tuple:
 
                 # Stop-loss hit
                 if row["Low"] <= stop_loss:
-                    pnl_pips = (stop_loss - entry_price) * 10_000  # pip = 0.0001
+                    pnl_pips = (stop_loss - entry_price) * 10_000
                     pnl_dollar = pnl_pips * (LOT_SIZE / 10_000) * trades[-1]["lots"]
+                    partial = trades[-1].get("partial_pnl", 0)
+                    total_dollar = pnl_dollar + partial
+                    total_pips = pnl_pips + (partial / (LOT_SIZE / 10_000) / max(trades[-1]["lots"], 0.01) if partial else 0)
                     reason = "TSL" if trailing_active else ("BE" if breakeven_hit else "SL")
                     trades[-1].update(exit_date=idx, exit_price=stop_loss,
-                                      pnl_pips=pnl_pips, pnl_dollar=pnl_dollar,
+                                      pnl_pips=total_pips, pnl_dollar=total_dollar,
                                       exit_reason=reason)
                     capital += pnl_dollar
                     position = 0
@@ -312,8 +375,10 @@ def run_backtest(df: pd.DataFrame) -> tuple:
                 elif not USE_TRAILING_STOP and row["High"] >= take_profit:
                     pnl_pips = (take_profit - entry_price) * 10_000
                     pnl_dollar = pnl_pips * (LOT_SIZE / 10_000) * trades[-1]["lots"]
+                    partial = trades[-1].get("partial_pnl", 0)
+                    total_dollar = pnl_dollar + partial
                     trades[-1].update(exit_date=idx, exit_price=take_profit,
-                                      pnl_pips=pnl_pips, pnl_dollar=pnl_dollar,
+                                      pnl_pips=pnl_pips, pnl_dollar=total_dollar,
                                       exit_reason="TP")
                     capital += pnl_dollar
                     position = 0
@@ -322,6 +387,17 @@ def run_backtest(df: pd.DataFrame) -> tuple:
             elif position == -1:
                 if row["Low"] < best_price:
                     best_price = row["Low"]
+
+                # Improvement #7: Partial close at 1.5x ATR
+                if USE_PARTIAL_CLOSE and not partial_closed:
+                    if best_price <= entry_price - PARTIAL_CLOSE_ATR * trail_atr:
+                        close_lots = round(trades[-1]["lots"] * PARTIAL_CLOSE_PCT, 2)
+                        partial_pips = PARTIAL_CLOSE_ATR * trail_atr * 10_000
+                        partial_dollar = partial_pips * (LOT_SIZE / 10_000) * close_lots
+                        capital += partial_dollar
+                        trades[-1]["lots"] = round(trades[-1]["lots"] - close_lots, 2)
+                        trades[-1]["partial_pnl"] = partial_dollar
+                        partial_closed = True
 
                 # Breakeven
                 if USE_BREAKEVEN_STOP and not breakeven_hit:
@@ -343,9 +419,12 @@ def run_backtest(df: pd.DataFrame) -> tuple:
                 if row["High"] >= stop_loss:
                     pnl_pips = (entry_price - stop_loss) * 10_000
                     pnl_dollar = pnl_pips * (LOT_SIZE / 10_000) * trades[-1]["lots"]
+                    partial = trades[-1].get("partial_pnl", 0)
+                    total_dollar = pnl_dollar + partial
+                    total_pips = pnl_pips + (partial / (LOT_SIZE / 10_000) / max(trades[-1]["lots"], 0.01) if partial else 0)
                     reason = "TSL" if trailing_active else ("BE" if breakeven_hit else "SL")
                     trades[-1].update(exit_date=idx, exit_price=stop_loss,
-                                      pnl_pips=pnl_pips, pnl_dollar=pnl_dollar,
+                                      pnl_pips=total_pips, pnl_dollar=total_dollar,
                                       exit_reason=reason)
                     capital += pnl_dollar
                     position = 0
@@ -355,8 +434,10 @@ def run_backtest(df: pd.DataFrame) -> tuple:
                 elif not USE_TRAILING_STOP and row["Low"] <= take_profit:
                     pnl_pips = (entry_price - take_profit) * 10_000
                     pnl_dollar = pnl_pips * (LOT_SIZE / 10_000) * trades[-1]["lots"]
+                    partial = trades[-1].get("partial_pnl", 0)
+                    total_dollar = pnl_dollar + partial
                     trades[-1].update(exit_date=idx, exit_price=take_profit,
-                                      pnl_pips=pnl_pips, pnl_dollar=pnl_dollar,
+                                      pnl_pips=pnl_pips, pnl_dollar=total_dollar,
                                       exit_reason="TP")
                     capital += pnl_dollar
                     position = 0
@@ -378,6 +459,7 @@ def run_backtest(df: pd.DataFrame) -> tuple:
                 trail_atr = atr
                 trailing_active = False
                 breakeven_hit = False
+                partial_closed = False
                 trades.append(dict(
                     entry_date=idx, direction="LONG",
                     entry_price=entry_price, sl=stop_loss, tp=take_profit,
@@ -398,6 +480,7 @@ def run_backtest(df: pd.DataFrame) -> tuple:
                 trail_atr = atr
                 trailing_active = False
                 breakeven_hit = False
+                partial_closed = False
                 trades.append(dict(
                     entry_date=idx, direction="SHORT",
                     entry_price=entry_price, sl=stop_loss, tp=take_profit,
@@ -415,8 +498,10 @@ def run_backtest(df: pd.DataFrame) -> tuple:
         else:
             pnl_pips = (entry_price - last["Close"]) * 10_000
         pnl_dollar = pnl_pips * (LOT_SIZE / 10_000) * trades[-1]["lots"]
+        partial = trades[-1].get("partial_pnl", 0)
+        total_dollar = pnl_dollar + partial
         trades[-1].update(exit_date=df.index[-1], exit_price=last["Close"],
-                          pnl_pips=pnl_pips, pnl_dollar=pnl_dollar,
+                          pnl_pips=pnl_pips, pnl_dollar=total_dollar,
                           exit_reason="EOD")
         capital += pnl_dollar
 
@@ -476,15 +561,24 @@ def print_stats(trade_df: pd.DataFrame, equity_df: pd.DataFrame) -> None:
     if USE_TREND_FILTER:
         filters.append(f"EMA{TREND_MA_PERIOD}")
     if USE_RSI_FILTER:
-        filters.append(f"RSI({RSI_OVERSOLD}/{RSI_OVERBOUGHT})")
+        filters.append(f"RSI(<{RSI_LONG_MAX}/{RSI_SHORT_MIN}<)")
     if USE_BB_ENTRY:
-        filters.append(f"BB({BB_PERIOD},{BB_STD})")
+        bb_tag = f"BB({BB_PERIOD},{BB_STD})"
+        if USE_BB_BOUNCE:
+            bb_tag += "+Bounce"
+        filters.append(bb_tag)
     if USE_ADX_FILTER:
         filters.append(f"ADX>{ADX_THRESHOLD}")
+    if USE_MACD_FILTER:
+        filters.append("MACD")
+    if USE_ATR_FILTER:
+        filters.append(f"ATR>p{ATR_PERCENTILE_MIN}")
     if USE_TRAILING_STOP:
-        filters.append("Trail")
+        filters.append(f"Trail({TRAIL_DISTANCE_ATR}x)")
     if USE_BREAKEVEN_STOP:
-        filters.append("BE")
+        filters.append(f"BE({BREAKEVEN_ATR}x)")
+    if USE_PARTIAL_CLOSE:
+        filters.append(f"Partial({int(PARTIAL_CLOSE_PCT*100)}%@{PARTIAL_CLOSE_ATR}x)")
     if COOLDOWN_BARS > 0:
         filters.append(f"CD{COOLDOWN_BARS}")
     filter_str = ", ".join(filters) if filters else "None"
@@ -538,9 +632,9 @@ def print_stats(trade_df: pd.DataFrame, equity_df: pd.DataFrame) -> None:
 
 def plot_results(df: pd.DataFrame, equity_df: pd.DataFrame,
                  trade_df: pd.DataFrame) -> None:
-    """Generate 5-panel chart: Price+BB+EMA, RSI, ADX, ATR, Equity."""
-    fig, axes = plt.subplots(5, 1, figsize=(16, 18), sharex=False,
-                             gridspec_kw={"height_ratios": [4, 1.2, 1, 1, 2]})
+    """Generate 6-panel chart: Price+BB+EMA, RSI, MACD, ADX, ATR, Equity."""
+    fig, axes = plt.subplots(6, 1, figsize=(16, 22), sharex=False,
+                             gridspec_kw={"height_ratios": [4, 1.2, 1.2, 1, 1, 2]})
 
     # ── Panel 1: Price + EMAs + Bollinger Bands ──
     ax = axes[0]
@@ -587,22 +681,34 @@ def plot_results(df: pd.DataFrame, equity_df: pd.DataFrame,
     # ── Panel 2: RSI ──
     ax = axes[1]
     ax.plot(df.index, df["RSI"], color="purple", linewidth=0.6)
-    ax.axhline(RSI_OVERBOUGHT, color="red", linestyle="--", linewidth=0.5)
-    ax.axhline(RSI_OVERSOLD, color="green", linestyle="--", linewidth=0.5)
+    ax.axhline(RSI_LONG_MAX, color="red", linestyle="--", linewidth=0.5,
+                label=f"Long max={RSI_LONG_MAX}")
+    ax.axhline(RSI_SHORT_MIN, color="green", linestyle="--", linewidth=0.5,
+                label=f"Short min={RSI_SHORT_MIN}")
     ax.axhline(50, color="gray", linestyle=":", linewidth=0.4)
-    ax.fill_between(df.index, RSI_OVERBOUGHT, df["RSI"],
-                     where=df["RSI"] >= RSI_OVERBOUGHT,
-                     alpha=0.2, color="red")
-    ax.fill_between(df.index, RSI_OVERSOLD, df["RSI"],
-                     where=df["RSI"] <= RSI_OVERSOLD,
-                     alpha=0.2, color="green")
+    ax.fill_between(df.index, RSI_LONG_MAX, 100,
+                     alpha=0.05, color="red")
+    ax.fill_between(df.index, 0, RSI_SHORT_MIN,
+                     alpha=0.05, color="green")
     ax.set_ylabel("RSI")
     ax.set_ylim(0, 100)
     ax.set_title(f"RSI ({RSI_PERIOD})", fontsize=10)
     ax.grid(True, alpha=0.3)
 
-    # ── Panel 3: ADX ──
+    # ── Panel 3: MACD ──
     ax = axes[2]
+    ax.plot(df.index, df["MACD_Line"], color="blue", linewidth=0.6, label="MACD")
+    ax.plot(df.index, df["MACD_Signal"], color="orange", linewidth=0.6, label="Signal")
+    colors = ["green" if v >= 0 else "red" for v in df["MACD_Hist"]]
+    ax.bar(df.index, df["MACD_Hist"], color=colors, alpha=0.4, width=0.15)
+    ax.axhline(0, color="gray", linestyle=":", linewidth=0.4)
+    ax.set_ylabel("MACD")
+    ax.set_title(f"MACD ({MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL})", fontsize=10)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
+
+    # ── Panel 4: ADX ──
+    ax = axes[3]
     ax.plot(df.index, df["ADX"], color="teal", linewidth=0.6)
     ax.axhline(ADX_THRESHOLD, color="red", linestyle="--", linewidth=0.5,
                 label=f"Threshold={ADX_THRESHOLD}")
@@ -614,8 +720,8 @@ def plot_results(df: pd.DataFrame, equity_df: pd.DataFrame,
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
 
-    # ── Panel 4: ATR ──
-    ax = axes[3]
+    # ── Panel 5: ATR ──
+    ax = axes[4]
     ax.plot(df.index, df["ATR"] * 10_000, color="brown", linewidth=0.6)
     ax.set_ylabel("ATR (pips)")
     ax.set_title(f"ATR ({ATR_PERIOD}) in Pips", fontsize=10)
