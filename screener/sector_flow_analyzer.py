@@ -95,7 +95,28 @@ def load_snapshot(filepath: str | Path) -> pd.DataFrame:
     """TradingView スクリーナー CSV を読み込み、正規化する"""
     df = pd.read_csv(filepath)
 
-    # カラム名の揺らぎを吸収
+    # 日本語カラム名 → 英語カラム名のマッピング
+    ja_col_map = {
+        "シンボル": "Ticker",
+        "詳細": "Name",
+        "価格": "Close",
+        "価格変動 % 1日": "Change %",
+        "出来高 1日": "Volume",
+        "相対ボリューム 1日": "Relative Volume",
+        "時価総額": "Market Cap",
+        "PER (株価収益率)": "P/E",
+        "セクター": "Sector",
+        "アナリストの評価": "Analyst Rating",
+        "希薄化EPS, 直近12ヶ月": "EPS (TTM)",
+        "希薄化EPS成長率 %, 直近12ヶ月前年比": "EPS Growth %",
+        "配当利回り %, 直近12ヶ月": "Dividend Yield %",
+    }
+    # まず日本語カラムを英語に変換
+    rename_map = {k: v for k, v in ja_col_map.items() if k in df.columns}
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # カラム名の揺らぎを吸収 (英語カラムの表記揺れ対応)
     col_map = {}
     for c in df.columns:
         lower = c.strip().lower()
@@ -807,7 +828,8 @@ def main():
         print(f"Error: {snap_dir} is not a directory")
         sys.exit(1)
 
-    csv_files = sorted(snap_dir.glob("*.csv"))
+    csv_files = sorted(snap_dir.glob("*.csv"),
+                       key=lambda f: extract_date_from_filename(f))
     if not csv_files:
         print(f"Error: No CSV files found in {snap_dir}")
         sys.exit(1)
