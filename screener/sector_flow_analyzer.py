@@ -91,10 +91,8 @@ REQUIRED_COLS = [
 ]
 
 
-def load_snapshot(filepath: str | Path) -> pd.DataFrame:
-    """TradingView スクリーナー CSV を読み込み、正規化する"""
-    df = pd.read_csv(filepath)
-
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """日本語/英語カラム名の揺らぎを正規化する"""
     # 日本語カラム名 → 英語カラム名のマッピング
     ja_col_map = {
         "シンボル": "Ticker",
@@ -110,8 +108,16 @@ def load_snapshot(filepath: str | Path) -> pd.DataFrame:
         "希薄化EPS, 直近12ヶ月": "EPS (TTM)",
         "希薄化EPS成長率 %, 直近12ヶ月前年比": "EPS Growth %",
         "配当利回り %, 直近12ヶ月": "Dividend Yield %",
+        # テクニカル指標の日本語カラム
+        "単純移動平均線 (20)": "SMA20",
+        "単純移動平均線 (50)": "SMA50",
+        "単純移動平均線 (200)": "SMA200",
+        "相対力指数 (14)": "RSI",
+        "MACD レベル (12, 26)": "MACD.macd",
+        "MACDシグナル (12, 26)": "MACD.signal",
+        "平均方向性指数 (14)": "ADX",
+        "アベレージ・トゥルー・レンジ (14)": "ATR",
     }
-    # まず日本語カラムを英語に変換
     rename_map = {k: v for k, v in ja_col_map.items() if k in df.columns}
     if rename_map:
         df = df.rename(columns=rename_map)
@@ -126,19 +132,30 @@ def load_snapshot(filepath: str | Path) -> pd.DataFrame:
             col_map[c] = "Relative Volume"
         elif lower in ("market cap", "mktcap", "market_cap"):
             col_map[c] = "Market Cap"
-        elif lower in ("macd.macd", "macd"):
+        elif lower in ("macd.macd", "macd", "macd level (12, 26)"):
             col_map[c] = "MACD.macd"
-        elif lower in ("macd.signal", "macdsignal"):
+        elif lower in ("macd.signal", "macdsignal", "macd signal (12, 26)"):
             col_map[c] = "MACD.signal"
+        elif lower in ("simple moving average (20)", "sma20"):
+            col_map[c] = "SMA20"
+        elif lower in ("simple moving average (50)", "sma50"):
+            col_map[c] = "SMA50"
+        elif lower in ("simple moving average (200)", "sma200"):
+            col_map[c] = "SMA200"
+        elif lower in ("relative strength index (14)", "rsi"):
+            col_map[c] = "RSI"
+        elif lower in ("average directional index (14)", "adx"):
+            col_map[c] = "ADX"
+        elif lower in ("average true range (14)", "atr"):
+            col_map[c] = "ATR"
     if col_map:
         df = df.rename(columns=col_map)
 
-    # 必須カラムチェック
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        print(f"  Warning: missing columns {missing} in {filepath}")
+    return df
 
-    # 数値変換
+
+def _convert_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """数値カラムを変換する"""
     numeric_cols = [
         "Close", "Change %", "Volume", "Relative Volume", "Market Cap",
         "SMA20", "SMA50", "SMA200", "RSI", "MACD.macd", "MACD.signal",
@@ -147,6 +164,44 @@ def load_snapshot(filepath: str | Path) -> pd.DataFrame:
     for c in numeric_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+def load_snapshot(filepath: str | Path, technical_filepath: str | Path | None = None) -> pd.DataFrame:
+    """
+    TradingView スクリーナー CSV を読み込み、正規化する。
+    technical_filepath が指定された場合、テクニカル指標CSVをTickerでマージする。
+    """
+    df = pd.read_csv(filepath)
+    df = _normalize_columns(df)
+
+    # テクニカル指標CSVをマージ
+    if technical_filepath is not None:
+        tech_df = pd.read_csv(technical_filepath)
+        tech_df = _normalize_columns(tech_df)
+        tech_df = _convert_numeric(tech_df)
+
+        if "Ticker" in tech_df.columns:
+            # セクターCSV側に既に存在するテクニカルカラムは上書きしない
+            # （テクニカルCSV側のデータを優先する）
+            tech_cols = [c for c in tech_df.columns if c != "Ticker"]
+            # セクターCSV側にあるがNaNだらけの同名カラムを除去してからマージ
+            overlap_cols = [c for c in tech_cols if c in df.columns]
+            if overlap_cols:
+                df = df.drop(columns=overlap_cols)
+
+            df = df.merge(tech_df[["Ticker"] + tech_cols], on="Ticker", how="left")
+            print(f"  Merged technical data from {Path(technical_filepath).name} "
+                  f"({len(tech_df)} rows, cols: {tech_cols})")
+        else:
+            print(f"  Warning: Technical CSV {technical_filepath} has no Ticker column, skipping merge")
+
+    # 必須カラムチェック
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        print(f"  Warning: missing columns {missing} in {filepath}")
+
+    df = _convert_numeric(df)
 
     # Sector が空の行を除外
     df = df.dropna(subset=["Sector"])
@@ -163,6 +218,50 @@ def extract_date_from_filename(filepath: str | Path) -> str:
     if m:
         return m.group(1)
     return name
+
+
+def is_technical_file(filepath: str | Path) -> bool:
+    """ファイル名が Technical で始まるかどうか判定する"""
+    return Path(filepath).name.lower().startswith("technical")
+
+
+def pair_snapshot_files(csv_files: list[Path]) -> list[tuple[Path, Optional[Path]]]:
+    """
+    セクターCSVとテクニカルCSVを日付でペアリングする。
+
+    Returns:
+        list of (sector_csv, technical_csv_or_None) tuples, sorted by date.
+    """
+    sector_files: dict[str, list[Path]] = {}
+    tech_files: dict[str, list[Path]] = {}
+
+    for f in csv_files:
+        date = extract_date_from_filename(f)
+        if is_technical_file(f):
+            tech_files.setdefault(date, []).append(f)
+        else:
+            sector_files.setdefault(date, []).append(f)
+
+    # 日付ごとにペアリング
+    pairs: list[tuple[Path, Optional[Path]]] = []
+    all_dates = sorted(set(list(sector_files.keys()) + list(tech_files.keys())))
+
+    for date in all_dates:
+        s_files = sector_files.get(date, [])
+        t_files = tech_files.get(date, [])
+
+        if not s_files:
+            # テクニカルのみ（セクター無し）はスキップ
+            if t_files:
+                print(f"  Skipping Technical-only file(s) for {date} (no matching sector CSV)")
+            continue
+
+        for sf in s_files:
+            # 同日のテクニカルファイルがあればペアリング
+            tf = t_files[0] if t_files else None
+            pairs.append((sf, tf))
+
+    return pairs
 
 
 # ---------------------------------------------------------------------------
@@ -838,16 +937,22 @@ def main():
         print(f"Error: No CSV files found in {snap_dir}")
         sys.exit(1)
 
-    print(f"\n  Found {len(csv_files)} snapshot(s) in {snap_dir}")
+    # セクターCSV と テクニカルCSV をペアリング
+    pairs = pair_snapshot_files(csv_files)
+    sector_count = len(pairs)
+    tech_count = sum(1 for _, t in pairs if t is not None)
+    print(f"\n  Found {len(csv_files)} CSV file(s) in {snap_dir}")
+    print(f"  Paired: {sector_count} sector file(s), {tech_count} technical file(s)")
 
     # 全スナップショットを処理
     all_metrics: list[list[SectorMetrics]] = []
     latest_df: Optional[pd.DataFrame] = None
 
-    for csvf in csv_files:
-        date_label = extract_date_from_filename(csvf)
-        print(f"  Processing: {csvf.name} ({date_label})")
-        df = load_snapshot(csvf)
+    for sector_csv, tech_csv in pairs:
+        date_label = extract_date_from_filename(sector_csv)
+        tech_info = f" + {tech_csv.name}" if tech_csv else ""
+        print(f"  Processing: {sector_csv.name}{tech_info} ({date_label})")
+        df = load_snapshot(sector_csv, technical_filepath=tech_csv)
         metrics = compute_sector_metrics(df, date_label)
         all_metrics.append(metrics)
         latest_df = df
