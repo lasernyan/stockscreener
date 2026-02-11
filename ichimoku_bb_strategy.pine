@@ -21,11 +21,28 @@ atrTslMult      = input.float(1.5, minval=0.1, title="ATR Trailing Stop Multipli
 useBBMiddleExit = input.bool(true, title="Exit on BB Middle Cross", group="Risk Management")
 
 // Filters
-requireVolConfirm    = input.bool(false, title="Require Volume Confirmation", group="Filters")
-volMultiplier        = input.float(1.5, minval=1.0, title="Volume Multiplier (vs 20 SMA)", group="Filters")
-requireBBConfirm     = input.bool(false, title="Require 2-bar BB Breakout Confirmation", group="Filters")
+requireVolConfirm      = input.bool(false, title="Require Volume Confirmation", group="Filters")
+volMultiplier          = input.float(1.5, minval=1.0, title="Volume Multiplier (vs 20 SMA)", group="Filters")
+requireBBConfirm       = input.bool(false, title="Require 2-bar BB Breakout Confirmation", group="Filters")
 requireReversalPattern = input.bool(true, title="Require Reversal Candlestick Pattern", group="Filters")
-enableShort          = input.bool(false, title="Enable Short Entries", group="Filters")
+enableShort            = input.bool(false, title="Enable Short Entries", group="Filters")
+
+// ADX Filter
+useADXFilter = input.bool(true, title="Use ADX Trend Filter", group="ADX Filter")
+adxLen       = input.int(14, minval=1, title="ADX Length", group="ADX Filter")
+adxSmoothing = input.int(14, minval=1, title="ADX Smoothing", group="ADX Filter")
+adxThreshold = input.float(20.0, minval=1.0, title="ADX Threshold", group="ADX Filter")
+
+// BB Squeeze
+useBBSqueeze     = input.bool(true, title="Use BB Squeeze Filter", group="BB Squeeze")
+squeezeLookback  = input.int(20, minval=1, title="Squeeze Lookback Period", group="BB Squeeze")
+squeezeWidthMult = input.float(1.1, minval=1.0, title="Squeeze Width Multiplier", group="BB Squeeze")
+squeezeBarsBack  = input.int(5, minval=1, title="Bars Since Squeeze (max)", group="BB Squeeze")
+
+// Multi-Timeframe
+useHTFFilter = input.bool(true, title="Use Higher Timeframe Filter", group="Multi-Timeframe")
+htfTimeframe = input.timeframe("D", title="Higher Timeframe", group="Multi-Timeframe")
+htfMALen     = input.int(50, minval=1, title="HTF Moving Average Length", group="Multi-Timeframe")
 
 // --- Calculations ---
 // Ichimoku
@@ -61,6 +78,25 @@ price_below_cloud = close < cloud_bottom
 // Bullish: current close is above the close from 26 bars ago (i.e., Chikou is above past price).
 chikouAbovePast = close > close[displacement - 1]
 chikouBelowPast = close < close[displacement - 1]
+
+// --- ADX Filter ---
+[diplus, diminus, adxVal2] = ta.dmi(adxLen, adxSmoothing)
+adxOk = not useADXFilter or adxVal2 > adxThreshold
+
+// --- BB Squeeze Detection ---
+bbWidth = (bbUpper - bbLower) / bbMiddle
+bbWidthMin = ta.lowest(bbWidth, squeezeLookback)
+bbSqueeze = bbWidth < bbWidthMin * squeezeWidthMult
+barsSinceSqueeze = ta.barssince(bbSqueeze)
+squeezeOk = not useBBSqueeze or (barsSinceSqueeze <= squeezeBarsBack)
+
+// --- Multi-Timeframe Filter ---
+htfClose = request.security(syminfo.tickerid, htfTimeframe, close)
+htfMA = request.security(syminfo.tickerid, htfTimeframe, ta.sma(close, htfMALen))
+htfBull = htfClose > htfMA
+htfBear = htfClose < htfMA
+htfOk_bull = not useHTFFilter or htfBull
+htfOk_bear = not useHTFFilter or htfBear
 
 // --- Bollinger Bands Conditions ---
 // Volume filter (optional)
@@ -103,8 +139,8 @@ bearReversalOk = not requireReversalPattern or bearishReversal
 sanyakuBull = tk_bull and price_above_cloud and chikouAbovePast
 sanyakuBear = tk_bear and price_below_cloud and chikouBelowPast
 
-longCondition  = sanyakuBull and bb_bull and volConfirmed and bullReversalOk
-shortCondition = sanyakuBear and bb_bear and volConfirmed and bearReversalOk
+longCondition  = sanyakuBull and bb_bull and volConfirmed and bullReversalOk and adxOk and squeezeOk and htfOk_bull
+shortCondition = sanyakuBear and bb_bear and volConfirmed and bearReversalOk and adxOk and squeezeOk and htfOk_bear
 
 notInPosition = strategy.position_size == 0
 inLong        = strategy.position_size > 0
@@ -177,6 +213,9 @@ plot(useStopLoss and enableShort and inShort ? close + atrVal * atrSlMult : na,
 // Background highlight on entry signals
 bgcolor(longCondition ? color.new(color.green, 90) : na, title="Long Signal BG")
 bgcolor(shortCondition ? color.new(color.red, 90) : na, title="Short Signal BG")
+
+// BB Squeeze highlight
+bgcolor(useBBSqueeze and bbSqueeze ? color.new(color.yellow, 85) : na, title="BB Squeeze BG")
 
 // Reversal pattern markers
 plotshape(requireReversalPattern and bullishReversal, title="Bullish Reversal", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny)
