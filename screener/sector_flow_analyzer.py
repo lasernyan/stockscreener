@@ -616,6 +616,10 @@ def plot_dashboard(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
+        try:
+            import matplotlib_fontja  # noqa: F401 — 日本語フォント自動適用
+        except ImportError:
+            pass
     except ImportError:
         print("  [Warning] matplotlib not installed. Skipping chart generation.")
         return
