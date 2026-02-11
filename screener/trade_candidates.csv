@@ -1,0 +1,11 @@
+ticker,name,sector,industry,signal,strength,close,change_pct,rsi,volume_ratio,reasons
+AAPL,Apple Inc,Technology,Consumer Electronics,LONG,80.0,250.1,0.64,60.5,1.05,強セクター (SCS=67.7) | Close > SMA50 (中期上昇) | Close > SMA200 (長期上昇) | RSI=60.5 (適正レンジ) | RVOL=1.05 (出来高増加) | MACD > Signal (上昇モメンタム) | ADX=27.8 (トレンド明確)
+NVDA,NVIDIA Corp,Technology,Semiconductors,LONG,80.0,145.2,1.68,69.8,1.3,強セクター (SCS=67.7) | Close > SMA50 (中期上昇) | Close > SMA200 (長期上昇) | RSI=69.8 (適正レンジ) | RVOL=1.30 (出来高増加) | MACD > Signal (上昇モメンタム) | ADX=34.5 (トレンド明確)
+META,Meta Platforms,Technology,Internet Content,LONG,80.0,618.5,1.01,64.2,1.02,強セクター (SCS=67.7) | Close > SMA50 (中期上昇) | Close > SMA200 (長期上昇) | RSI=64.2 (適正レンジ) | RVOL=1.02 (出来高増加) | MACD > Signal (上昇モメンタム) | ADX=29.5 (トレンド明確)
+AVGO,Broadcom Inc,Technology,Semiconductors,LONG,80.0,241.2,1.13,67.1,1.18,強セクター (SCS=67.7) | Close > SMA50 (中期上昇) | Close > SMA200 (長期上昇) | RSI=67.1 (適正レンジ) | RVOL=1.18 (出来高増加) | MACD > Signal (上昇モメンタム) | ADX=31.2 (トレンド明確)
+GS,Goldman Sachs,Financial,Capital Markets,LONG,80.0,618.8,1.05,59.5,1.02,強セクター (SCS=65.8) | Close > SMA50 (中期上昇) | Close > SMA200 (長期上昇) | RSI=59.5 (適正レンジ) | RVOL=1.02 (出来高増加) | MACD > Signal (上昇モメンタム) | ADX=26.2 (トレンド明確)
+BAC,Bank of America,Financial,Banks - Diversified,LONG,80.0,47.85,1.38,58.2,1.05,強セクター (SCS=65.8) | Close > SMA50 (中期上昇) | Close > SMA200 (長期上昇) | RSI=58.2 (適正レンジ) | RVOL=1.05 (出来高増加) | MACD > Signal (上昇モメンタム) | ADX=21.5 (トレンド明確)
+XOM,Exxon Mobil,Energy,Oil & Gas Integrated,SHORT,80.0,106.8,-1.66,33.1,1.3,弱セクター (SCS=31.4) | Close < SMA50 (中期下降) | Close < SMA200 (長期下降) | RSI=33.1 (まだ売り余地) | RVOL=1.30 (売り圧力) | MACD < Signal (下降モメンタム) | ADX=24.2 (トレンド明確)
+CVX,Chevron Corp,Energy,Oil & Gas Integrated,SHORT,80.0,146.5,-1.21,35.8,1.2,弱セクター (SCS=31.4) | Close < SMA50 (中期下降) | Close < SMA200 (長期下降) | RSI=35.8 (まだ売り余地) | RVOL=1.20 (売り圧力) | MACD < Signal (下降モメンタム) | ADX=21.8 (トレンド明確)
+COP,ConocoPhillips,Energy,Oil & Gas E&P,SHORT,80.0,103.5,-1.62,31.2,1.35,弱セクター (SCS=31.4) | Close < SMA50 (中期下降) | Close < SMA200 (長期下降) | RSI=31.2 (まだ売り余地) | RVOL=1.35 (売り圧力) | MACD < Signal (下降モメンタム) | ADX=26.5 (トレンド明確)
+EOG,EOG Resources,Energy,Oil & Gas E&P,SHORT,80.0,124.2,-1.27,33.2,1.18,弱セクター (SCS=31.4) | Close < SMA50 (中期下降) | Close < SMA200 (長期下降) | RSI=33.2 (まだ売り余地) | RVOL=1.18 (売り圧力) | MACD < Signal (下降モメンタム) | ADX=24.0 (トレンド明確)
