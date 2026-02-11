@@ -108,7 +108,7 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "希薄化EPS, 直近12ヶ月": "EPS (TTM)",
         "希薄化EPS成長率 %, 直近12ヶ月前年比": "EPS Growth %",
         "配当利回り %, 直近12ヶ月": "Dividend Yield %",
-        # テクニカル指標の日本語カラム
+        # テクニカル指標の日本語カラム (直接指標値)
         "単純移動平均線 (20)": "SMA20",
         "単純移動平均線 (50)": "SMA50",
         "単純移動平均線 (200)": "SMA200",
@@ -117,12 +117,18 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "MACDシグナル (12, 26)": "MACD.signal",
         "平均方向性指数 (14)": "ADX",
         "アベレージ・トゥルー・レンジ (14)": "ATR",
+        # TradingView テクニカル分析 CSV の日本語カラム (評価+オシレーター)
+        "テクニカルの評価 1日": "Technical Rating",
+        "移動平均線の評価 1日": "MA Rating",
+        "オシレーターの評価 1日": "Oscillator Rating",
+        "ローソク足パターン 1日": "Candlestick Pattern",
     }
     rename_map = {k: v for k, v in ja_col_map.items() if k in df.columns}
     if rename_map:
         df = df.rename(columns=rename_map)
 
-    # カラム名の揺らぎを吸収 (英語カラムの表記揺れ対応)
+    # カラム名の揺らぎを吸収 (英語/日本語カラムの表記揺れ対応)
+    import re as _re
     col_map = {}
     for c in df.columns:
         lower = c.strip().lower()
@@ -148,6 +154,19 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
             col_map[c] = "ADX"
         elif lower in ("average true range (14)", "atr"):
             col_map[c] = "ATR"
+        # TradingView テクニカルCSVの「〜 1日」付きカラム名に対応
+        elif _re.match(r"rsi\s*\(相対力指数\)\s*\(14\)", lower):
+            col_map[c] = "RSI"
+        elif _re.match(r"mom\s*\(モメンタム\)\s*\(10\)", lower):
+            col_map[c] = "Momentum"
+        elif _re.match(r"ao\s*\(オーサム・オシレーター\)", lower):
+            col_map[c] = "Awesome Oscillator"
+        elif _re.match(r"cci\s*\(商品チャネル指数\)\s*\(20\)", lower):
+            col_map[c] = "CCI"
+        elif "stoch" in lower and "ストキャスティクス" in c and "%k" in lower:
+            col_map[c] = "Stoch %K"
+        elif "stoch" in lower and "ストキャスティクス" in c and "%d" in lower:
+            col_map[c] = "Stoch %D"
     if col_map:
         df = df.rename(columns=col_map)
 
@@ -160,6 +179,7 @@ def _convert_numeric(df: pd.DataFrame) -> pd.DataFrame:
         "Close", "Change %", "Volume", "Relative Volume", "Market Cap",
         "SMA20", "SMA50", "SMA200", "RSI", "MACD.macd", "MACD.signal",
         "ADX", "ATR", "P/E", "EPS (TTM)",
+        "Momentum", "Awesome Oscillator", "CCI", "Stoch %K", "Stoch %D",
     ]
     for c in numeric_cols:
         if c in df.columns:
@@ -456,6 +476,16 @@ def generate_trade_signals(
 
     candidates = []
 
+    # SMA データが存在するかチェック (全銘柄の大半で SMA50 が有効か)
+    has_sma = "SMA50" in df.columns and df["SMA50"].notna().mean() > 0.3
+    has_macd = "MACD.macd" in df.columns and df["MACD.macd"].notna().mean() > 0.3
+    has_adx = "ADX" in df.columns and df["ADX"].notna().mean() > 0.3
+    # テクニカル評価カラム (Technical Rating) が利用可能か
+    has_tech_rating = "Technical Rating" in df.columns
+    has_momentum = "Momentum" in df.columns
+    has_cci = "CCI" in df.columns
+    has_stoch = "Stoch %K" in df.columns
+
     for _, row in df.iterrows():
         sector = row.get("Sector", "")
         ticker = row.get("Ticker", "")
@@ -466,11 +496,30 @@ def generate_trade_signals(
         change = row.get("Change %", 0)
         rsi = row.get("RSI", 50)
         rvol = row.get("Relative Volume", 1.0)
-        sma50 = row.get("SMA50", close)
-        sma200 = row.get("SMA200", close)
+        sma50 = row.get("SMA50", None)
+        sma200 = row.get("SMA200", None)
         adx = row.get("ADX", 0)
         macd = row.get("MACD.macd", 0)
         macd_sig = row.get("MACD.signal", 0)
+
+        # テクニカルCSV由来の指標
+        tech_rating = str(row.get("Technical Rating", "")).strip()
+        ma_rating = str(row.get("MA Rating", "")).strip()
+        momentum = row.get("Momentum", 0) if has_momentum else 0
+        cci = row.get("CCI", 0) if has_cci else 0
+        stoch_k = row.get("Stoch %K", 50) if has_stoch else 50
+
+        # NaN チェック
+        if pd.isna(rsi):
+            rsi = 50
+        if pd.isna(momentum):
+            momentum = 0
+        if pd.isna(cci):
+            cci = 0
+        if pd.isna(stoch_k):
+            stoch_k = 50
+        if pd.isna(rvol):
+            rvol = 1.0
 
         reasons = []
         signal = None
@@ -481,16 +530,31 @@ def generate_trade_signals(
             is_long = True
             reasons.append(f"強セクター (SCS={scs_map.get(sector, 0):.1f})")
 
-            if close > sma50:
-                strength += 20
-                reasons.append("Close > SMA50 (中期上昇)")
+            # SMA ベースのトレンド判定 (利用可能な場合)
+            if has_sma and sma50 is not None and not pd.isna(sma50):
+                if close > sma50:
+                    strength += 20
+                    reasons.append("Close > SMA50 (中期上昇)")
+                else:
+                    is_long = False
+                if sma200 is not None and not pd.isna(sma200) and close > sma200:
+                    strength += 15
+                    reasons.append("Close > SMA200 (長期上昇)")
             else:
-                is_long = False
+                # SMA がない場合: Technical Rating / MA Rating で代替
+                if has_tech_rating:
+                    if tech_rating in ("買い", "強い買い"):
+                        strength += 20
+                        reasons.append(f"テクニカル評価: {tech_rating}")
+                    elif tech_rating == "中立":
+                        strength += 5
+                    else:
+                        is_long = False
+                if ma_rating in ("買い", "強い買い"):
+                    strength += 10
+                    reasons.append(f"MA評価: {ma_rating}")
 
-            if close > sma200:
-                strength += 15
-                reasons.append("Close > SMA200 (長期上昇)")
-
+            # RSI
             if 40 < rsi < 70:
                 strength += 15
                 reasons.append(f"RSI={rsi:.1f} (適正レンジ)")
@@ -498,18 +562,30 @@ def generate_trade_signals(
                 strength -= 10
                 reasons.append(f"RSI={rsi:.1f} (過熱注意)")
 
+            # 出来高
             if rvol > 1.0:
                 strength += 10
                 reasons.append(f"RVOL={rvol:.2f} (出来高増加)")
 
-            if macd > macd_sig:
+            # MACD (利用可能な場合)
+            if has_macd and macd > macd_sig:
                 strength += 10
                 reasons.append("MACD > Signal (上昇モメンタム)")
 
-            if adx > 20:
+            # ADX (利用可能な場合)
+            if has_adx and adx > 20:
                 strength += 10
                 reasons.append(f"ADX={adx:.1f} (トレンド明確)")
 
+            # Momentum / CCI 代替指標
+            if has_momentum and momentum > 0:
+                strength += 5
+                reasons.append(f"Momentum={momentum:.2f} (上昇)")
+            if has_cci and cci > 100:
+                strength += 5
+                reasons.append(f"CCI={cci:.0f} (強気)")
+
+            # ローテーション
             if sector in rising_set:
                 strength += 15
                 reasons.append("ローテーション流入中")
@@ -522,16 +598,31 @@ def generate_trade_signals(
             is_short = True
             reasons.append(f"弱セクター (SCS={scs_map.get(sector, 0):.1f})")
 
-            if close < sma50:
-                strength += 20
-                reasons.append("Close < SMA50 (中期下降)")
+            # SMA ベースのトレンド判定 (利用可能な場合)
+            if has_sma and sma50 is not None and not pd.isna(sma50):
+                if close < sma50:
+                    strength += 20
+                    reasons.append("Close < SMA50 (中期下降)")
+                else:
+                    is_short = False
+                if sma200 is not None and not pd.isna(sma200) and close < sma200:
+                    strength += 15
+                    reasons.append("Close < SMA200 (長期下降)")
             else:
-                is_short = False
+                # SMA がない場合: Technical Rating / MA Rating で代替
+                if has_tech_rating:
+                    if tech_rating in ("売り", "強い売り"):
+                        strength += 20
+                        reasons.append(f"テクニカル評価: {tech_rating}")
+                    elif tech_rating == "中立":
+                        strength += 5
+                    else:
+                        is_short = False
+                if ma_rating in ("売り", "強い売り"):
+                    strength += 10
+                    reasons.append(f"MA評価: {ma_rating}")
 
-            if close < sma200:
-                strength += 15
-                reasons.append("Close < SMA200 (長期下降)")
-
+            # RSI
             if 30 < rsi < 60:
                 strength += 15
                 reasons.append(f"RSI={rsi:.1f} (まだ売り余地)")
@@ -539,18 +630,30 @@ def generate_trade_signals(
                 strength -= 10
                 reasons.append(f"RSI={rsi:.1f} (売られ過ぎ注意)")
 
+            # 出来高
             if rvol > 1.0:
                 strength += 10
                 reasons.append(f"RVOL={rvol:.2f} (売り圧力)")
 
-            if macd < macd_sig:
+            # MACD (利用可能な場合)
+            if has_macd and macd < macd_sig:
                 strength += 10
                 reasons.append("MACD < Signal (下降モメンタム)")
 
-            if adx > 20:
+            # ADX (利用可能な場合)
+            if has_adx and adx > 20:
                 strength += 10
                 reasons.append(f"ADX={adx:.1f} (トレンド明確)")
 
+            # Momentum / CCI 代替指標
+            if has_momentum and momentum < 0:
+                strength += 5
+                reasons.append(f"Momentum={momentum:.2f} (下降)")
+            if has_cci and cci < -100:
+                strength += 5
+                reasons.append(f"CCI={cci:.0f} (弱気)")
+
+            # ローテーション
             if sector in falling_set:
                 strength += 15
                 reasons.append("ローテーション流出中")
