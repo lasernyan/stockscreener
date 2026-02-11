@@ -1,0 +1,450 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//
+// AUDUSD 4H EMA Crossover + RSI + BB Strategy (v2 — 7 Improvements)
+// ==================================================================
+// Converted from Python backtest. Optimized for AUDUSD 4H chart.
+//
+// Improvements included:
+//   #1 BB Bounce Confirmation (prev bar touch + current bar close inside)
+//   #2 Relaxed Breakeven (2.0x ATR instead of 1.0x)
+//   #3 Wider Trailing Stop (2.0x ATR distance instead of 1.0x)
+//   #4 Tighter RSI Filter (Long < 55, Short > 45)
+//   #5 MACD Histogram Confirmation
+//   #6 ATR Minimum Threshold (skip low-volatility periods)
+//   #7 Partial Position Close (50% at 1.5x ATR profit)
+
+//@version=5
+strategy("AUDUSD 4H EMA+RSI+BB v2", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=2,
+     initial_capital=100000, currency=currency.USD,
+     pyramiding=0, calc_on_every_tick=false,
+     commission_type=strategy.commission.cash_per_order, commission_value=0)
+
+// ══════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════
+
+// ── EMA Crossover ──
+emaFastLen   = input.int(20,   "EMA Fast Period",      group="EMA Crossover")
+emaSlowLen   = input.int(50,   "EMA Slow Period",      group="EMA Crossover")
+
+// ── RSI Filter (#4: tighter thresholds) ──
+useRSI       = input.bool(true, "Use RSI Filter",      group="RSI")
+rsiPeriod    = input.int(14,    "RSI Period",           group="RSI")
+rsiLongMax   = input.float(55,  "RSI Long Max (<)",     group="RSI", tooltip="Longs only when RSI below this")
+rsiShortMin  = input.float(45,  "RSI Short Min (>)",    group="RSI", tooltip="Shorts only when RSI above this")
+
+// ── Bollinger Bands (#1: bounce confirmation) ──
+useBB        = input.bool(true, "Use BB Entry",         group="Bollinger Bands")
+useBBBounce  = input.bool(true, "Require BB Bounce",    group="Bollinger Bands", tooltip="#1: Prev bar touches BB, current bar closes back inside")
+bbPeriod     = input.int(20,    "BB Period",            group="Bollinger Bands")
+bbStdDev     = input.float(2.0, "BB Std Dev",           group="Bollinger Bands")
+
+// ── ATR Stop/Target ──
+atrPeriod    = input.int(14,    "ATR Period",           group="ATR")
+atrSLMult    = input.float(1.5, "ATR SL Multiplier",   group="ATR")
+atrTPMult    = input.float(3.0, "ATR TP Multiplier",   group="ATR")
+
+// ── Trailing Stop (#3: wider distance) ──
+useTrail     = input.bool(true, "Use Trailing Stop",    group="Trailing Stop")
+trailActATR  = input.float(1.5, "Trail Activation (ATR x)", group="Trailing Stop")
+trailDistATR = input.float(2.0, "Trail Distance (ATR x)",   group="Trailing Stop", tooltip="#3: Widened from 1.0 to 2.0")
+
+// ── Breakeven (#2: relaxed threshold) ──
+useBE        = input.bool(true, "Use Breakeven Stop",   group="Breakeven")
+beATR        = input.float(2.0, "Breakeven ATR Mult",   group="Breakeven", tooltip="#2: Relaxed from 1.0 to 2.0")
+
+// ── Cooldown ──
+cooldownBars = input.int(3,     "Cooldown Bars after SL", group="Cooldown", minval=0)
+
+// ── ADX Filter ──
+useADX       = input.bool(true, "Use ADX Filter",       group="ADX")
+adxPeriod    = input.int(14,    "ADX Period",            group="ADX")
+adxThreshold = input.float(20,  "ADX Threshold",         group="ADX")
+
+// ── 200 EMA Trend Filter ──
+useTrend200  = input.bool(true, "Use 200 EMA Filter",   group="Trend Filter")
+trendMAPeriod = input.int(200,  "Trend MA Period",       group="Trend Filter")
+
+// ── MACD (#5: histogram confirmation) ──
+useMACD      = input.bool(true, "Use MACD Filter",      group="MACD")
+macdFast     = input.int(12,    "MACD Fast",             group="MACD")
+macdSlow     = input.int(26,    "MACD Slow",             group="MACD")
+macdSignal   = input.int(9,     "MACD Signal",           group="MACD")
+
+// ── ATR Volatility Filter (#6) ──
+useATRFilter = input.bool(true, "Use ATR Vol Filter",   group="ATR Filter")
+atrLookback  = input.int(200,   "ATR Lookback",          group="ATR Filter")
+atrPctMin    = input.float(25,  "ATR Percentile Min",    group="ATR Filter", tooltip="#6: Skip when ATR below this percentile")
+
+// ── Partial Close (#7) ──
+usePartial   = input.bool(true, "Use Partial Close",    group="Partial Close")
+partialATR   = input.float(1.5, "Partial Close ATR Mult", group="Partial Close")
+partialPct   = input.float(50,  "Partial Close %",       group="Partial Close", tooltip="#7: Close this % at target")
+
+// ── Visual ──
+showSignals  = input.bool(true, "Show Entry Signals",   group="Display")
+showSLTP     = input.bool(true, "Show SL/TP Lines",     group="Display")
+
+// ══════════════════════════════════════════════════════════════════════
+// INDICATORS
+// ══════════════════════════════════════════════════════════════════════
+
+// ── EMA Crossover ──
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+uptrend   = emaFast > emaSlow
+downtrend = emaFast < emaSlow
+
+// ── RSI ──
+rsiVal = ta.rsi(close, rsiPeriod)
+
+// ── Bollinger Bands ──
+bbMid   = ta.sma(close, bbPeriod)
+bbDev   = ta.stdev(close, bbPeriod)
+bbUpper = bbMid + bbStdDev * bbDev
+bbLower = bbMid - bbStdDev * bbDev
+
+// ── ATR ──
+atrVal = ta.atr(atrPeriod)
+
+// ── 200 EMA ──
+ema200 = ta.ema(close, trendMAPeriod)
+
+// ── ADX (manually computed for flexibility) ──
+// Using ta.dmi built-in
+[diPlus, diMinus, adxVal] = ta.dmi(adxPeriod, adxPeriod)
+
+// ── MACD ──
+[macdLine, macdSig, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+// ── ATR Percentile (#6) ──
+// Approximate percentile using a ranking approach over lookback window
+atrPercentileOk = true
+if useATRFilter
+    count = 0
+    for j = 0 to atrLookback - 1
+        if atrVal > nz(atrVal[j])
+            count += 1
+    pctRank = (count / atrLookback) * 100.0
+    atrPercentileOk := pctRank >= atrPctMin
+
+// ══════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ══════════════════════════════════════════════════════════════════════
+
+// ── BB Entry Trigger ──
+longTrigger  = false
+shortTrigger = false
+
+if useBB
+    if useBBBounce
+        // #1: Previous bar touched BB, current bar closed back inside
+        prevTouchedLower = low[1] <= bbLower[1]
+        bouncedUp        = close > bbLower
+        longTrigger     := prevTouchedLower and bouncedUp
+
+        prevTouchedUpper = high[1] >= bbUpper[1]
+        bouncedDown      = close < bbUpper
+        shortTrigger    := prevTouchedUpper and bouncedDown
+    else
+        longTrigger  := low <= bbLower
+        shortTrigger := high >= bbUpper
+else
+    // Simple EMA crossover
+    longTrigger  := ta.crossover(emaFast, emaSlow)
+    shortTrigger := ta.crossunder(emaFast, emaSlow)
+
+// ── Combine all filters ──
+longSignal  = uptrend and longTrigger
+shortSignal = downtrend and shortTrigger
+
+// RSI filter (#4)
+if useRSI
+    longSignal  := longSignal  and (rsiVal < rsiLongMax)
+    shortSignal := shortSignal and (rsiVal > rsiShortMin)
+
+// 200 EMA trend filter
+if useTrend200
+    longSignal  := longSignal  and (close > ema200)
+    shortSignal := shortSignal and (close < ema200)
+
+// ADX filter
+if useADX
+    longSignal  := longSignal  and (adxVal > adxThreshold)
+    shortSignal := shortSignal and (adxVal > adxThreshold)
+
+// MACD filter (#5)
+if useMACD
+    macdBullish = macdHist > 0 or macdHist > nz(macdHist[1])
+    macdBearish = macdHist < 0 or macdHist < nz(macdHist[1])
+    longSignal  := longSignal  and macdBullish
+    shortSignal := shortSignal and macdBearish
+
+// ATR volatility filter (#6)
+if useATRFilter
+    longSignal  := longSignal  and atrPercentileOk
+    shortSignal := shortSignal and atrPercentileOk
+
+// ══════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT STATE
+// ══════════════════════════════════════════════════════════════════════
+
+var float entryPrice     = na
+var float slPrice        = na
+var float tpPrice        = na
+var float bestPrice      = na
+var float entryATR       = na
+var bool  trailActive    = false
+var bool  breakEvenHit   = false
+var bool  partialClosed  = false
+var int   cooldownCount  = 0
+var int   posDir         = 0    // 1=long, -1=short, 0=flat
+
+// ══════════════════════════════════════════════════════════════════════
+// COOLDOWN MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════
+
+if cooldownCount > 0
+    cooldownCount := cooldownCount - 1
+
+// ══════════════════════════════════════════════════════════════════════
+// POSITION TRACKING (sync with strategy)
+// ══════════════════════════════════════════════════════════════════════
+
+isLong  = strategy.position_size > 0
+isShort = strategy.position_size < 0
+isFlat  = strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════
+// LONG MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════
+
+if isLong and posDir == 1
+    // Track best price
+    if high > bestPrice
+        bestPrice := high
+
+    // #7: Partial close at target
+    if usePartial and not partialClosed
+        if bestPrice >= entryPrice + partialATR * entryATR
+            strategy.close("Long", comment="Partial TP", qty_percent=partialPct)
+            partialClosed := true
+
+    // #2: Breakeven
+    if useBE and not breakEvenHit
+        if bestPrice >= entryPrice + beATR * entryATR
+            slPrice      := entryPrice
+            breakEvenHit := true
+
+    // #3: Trailing stop
+    if useTrail
+        if trailActive
+            newTrailSL = bestPrice - trailDistATR * entryATR
+            if newTrailSL > slPrice
+                slPrice := newTrailSL
+        else
+            if bestPrice >= entryPrice + trailActATR * entryATR
+                trailActive := true
+                newTrailSL  = bestPrice - trailDistATR * entryATR
+                if newTrailSL > slPrice
+                    slPrice := newTrailSL
+
+    // Check SL hit
+    if low <= slPrice
+        exitComment = trailActive ? "TSL" : (breakEvenHit ? "BE" : "SL")
+        strategy.close("Long", comment=exitComment)
+        if exitComment == "SL"
+            cooldownCount := cooldownBars
+        posDir := 0
+
+// ══════════════════════════════════════════════════════════════════════
+// SHORT MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════
+
+if isShort and posDir == -1
+    // Track best price
+    if low < bestPrice
+        bestPrice := low
+
+    // #7: Partial close at target
+    if usePartial and not partialClosed
+        if bestPrice <= entryPrice - partialATR * entryATR
+            strategy.close("Short", comment="Partial TP", qty_percent=partialPct)
+            partialClosed := true
+
+    // #2: Breakeven
+    if useBE and not breakEvenHit
+        if bestPrice <= entryPrice - beATR * entryATR
+            slPrice      := entryPrice
+            breakEvenHit := true
+
+    // #3: Trailing stop
+    if useTrail
+        if trailActive
+            newTrailSL = bestPrice + trailDistATR * entryATR
+            if newTrailSL < slPrice
+                slPrice := newTrailSL
+        else
+            if bestPrice <= entryPrice - trailActATR * entryATR
+                trailActive := true
+                newTrailSL  = bestPrice + trailDistATR * entryATR
+                if newTrailSL < slPrice
+                    slPrice := newTrailSL
+
+    // Check SL hit
+    if high >= slPrice
+        exitComment = trailActive ? "TSL" : (breakEvenHit ? "BE" : "SL")
+        strategy.close("Short", comment=exitComment)
+        if exitComment == "SL"
+            cooldownCount := cooldownBars
+        posDir := 0
+
+// ══════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC
+// ══════════════════════════════════════════════════════════════════════
+
+if isFlat and cooldownCount == 0
+    if longSignal and atrVal > 0
+        entryPrice    := close
+        slPrice       := close - atrSLMult * atrVal
+        tpPrice       := close + atrTPMult * atrVal
+        bestPrice     := close
+        entryATR      := atrVal
+        trailActive   := false
+        breakEvenHit  := false
+        partialClosed := false
+        posDir        := 1
+        strategy.entry("Long", strategy.long, comment="Long")
+
+    else if shortSignal and atrVal > 0
+        entryPrice    := close
+        slPrice       := close + atrSLMult * atrVal
+        tpPrice       := close - atrTPMult * atrVal
+        bestPrice     := close
+        entryATR      := atrVal
+        trailActive   := false
+        breakEvenHit  := false
+        partialClosed := false
+        posDir        := -1
+        strategy.entry("Short", strategy.short, comment="Short")
+
+// Reset state when position is closed externally
+if isFlat and posDir != 0
+    posDir := 0
+
+// ══════════════════════════════════════════════════════════════════════
+// PLOTS
+// ══════════════════════════════════════════════════════════════════════
+
+// ── EMAs ──
+plot(emaFast,  "EMA Fast",   color=color.blue,   linewidth=1)
+plot(emaSlow,  "EMA Slow",   color=color.red,    linewidth=1)
+plot(ema200,   "EMA 200",    color=color.orange,  linewidth=2)
+
+// ── Bollinger Bands ──
+p_bbUpper = plot(bbUpper, "BB Upper", color=color.gray, linewidth=1)
+p_bbLower = plot(bbLower, "BB Lower", color=color.gray, linewidth=1)
+fill(p_bbUpper, p_bbLower, color=color.new(color.blue, 95), title="BB Fill")
+
+// ── SL/TP Lines ──
+slColor = posDir == 1 ? color.new(color.red, 30) :
+          posDir == -1 ? color.new(color.red, 30) : na
+tpColor = posDir == 1 ? color.new(color.green, 30) :
+          posDir == -1 ? color.new(color.green, 30) : na
+
+plot(showSLTP and posDir != 0 ? slPrice : na, "Stop Loss",
+     color=slColor, style=plot.style_linebr, linewidth=2)
+plot(showSLTP and posDir != 0 ? tpPrice : na, "Take Profit",
+     color=tpColor, style=plot.style_linebr, linewidth=2)
+plot(showSLTP and posDir != 0 ? entryPrice : na, "Entry",
+     color=color.new(color.white, 30), style=plot.style_linebr, linewidth=1)
+
+// ── Entry Signals ──
+plotshape(showSignals and longSignal and isFlat and cooldownCount == 0,
+          "Long Signal",  style=shape.triangleup,
+          location=location.belowbar, color=color.green, size=size.small)
+plotshape(showSignals and shortSignal and isFlat and cooldownCount == 0,
+          "Short Signal", style=shape.triangledown,
+          location=location.abovebar, color=color.red,   size=size.small)
+
+// ── Partial Close marker ──
+plotshape(usePartial and partialClosed and not partialClosed[1],
+          "Partial TP", style=shape.diamond,
+          location=location.abovebar, color=color.orange, size=size.tiny)
+
+// ── Background: Cooldown ──
+bgcolor(cooldownCount > 0 ? color.new(color.red, 95) : na, title="Cooldown")
+
+// ── Background: Trend ──
+bgcolor(uptrend ? color.new(color.green, 97) : downtrend ? color.new(color.red, 97) : na,
+        title="Trend BG")
+
+// ══════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ══════════════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(infoTable, 0, 0,  "Filter",       text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0,  "Status",        text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 1,  "EMA " + str.tostring(emaFastLen) + "/" + str.tostring(emaSlowLen),
+               text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 1,  uptrend ? "UP" : "DOWN",
+               text_color=uptrend ? color.green : color.red, text_size=size.tiny)
+    table.cell(infoTable, 0, 2,  "RSI",           text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 2,  str.tostring(rsiVal, "#.0"),
+               text_color=rsiVal < rsiLongMax and rsiVal > rsiShortMin ? color.yellow :
+                           rsiVal < rsiLongMax ? color.green : color.red,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 3,  "ADX",           text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 3,  str.tostring(adxVal, "#.0"),
+               text_color=adxVal > adxThreshold ? color.green : color.gray,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 4,  "MACD Hist",     text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 4,  str.tostring(macdHist, "#.00000"),
+               text_color=macdHist > 0 ? color.green : color.red,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 5,  "ATR (pips)",    text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 5,  str.tostring(atrVal * 10000, "#.0"),
+               text_color=atrPercentileOk ? color.green : color.gray,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 6,  "EMA 200",       text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 6,  close > ema200 ? "ABOVE" : "BELOW",
+               text_color=close > ema200 ? color.green : color.red,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 7,  "Position",      text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 7,  posDir == 1 ? "LONG" : posDir == -1 ? "SHORT" : "FLAT",
+               text_color=posDir == 1 ? color.green : posDir == -1 ? color.red : color.gray,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 8,  "Trail",         text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 8,  trailActive ? "ACTIVE" : "---",
+               text_color=trailActive ? color.orange : color.gray,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 9,  "Breakeven",     text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 9,  breakEvenHit ? "HIT" : "---",
+               text_color=breakEvenHit ? color.green : color.gray,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 10, "Cooldown",      text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 10, str.tostring(cooldownCount),
+               text_color=cooldownCount > 0 ? color.red : color.gray,
+               text_size=size.tiny)
+    table.cell(infoTable, 0, 11, "Partial",       text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 1, 11, partialClosed ? "DONE" : "---",
+               text_color=partialClosed ? color.orange : color.gray,
+               text_size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════
+
+alertcondition(longSignal  and isFlat and cooldownCount == 0,
+               "Long Entry",  "AUDUSD 4H: Long signal — BB bounce + all filters confirmed")
+alertcondition(shortSignal and isFlat and cooldownCount == 0,
+               "Short Entry", "AUDUSD 4H: Short signal — BB bounce + all filters confirmed")
+alertcondition(isLong  and low  <= slPrice and posDir == 1,
+               "Long SL Hit",  "AUDUSD 4H: Long stop-loss triggered")
+alertcondition(isShort and high >= slPrice and posDir == -1,
+               "Short SL Hit", "AUDUSD 4H: Short stop-loss triggered")
