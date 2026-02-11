@@ -1,0 +1,10 @@
+# Environment variables (secrets)
+.env
+
+# Node
+node_modules/
+
+# Research output data
+data/context-research/*.json
+data/context-research/*.txt
+data/context-research/*.md
