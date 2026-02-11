@@ -154,9 +154,21 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
             col_map[c] = "ADX"
         elif lower in ("average true range (14)", "atr"):
             col_map[c] = "ATR"
-        # TradingView テクニカルCSVの「〜 1日」付きカラム名に対応
-        elif _re.match(r"rsi\s*\(相対力指数\)\s*\(14\)", lower):
+        # TradingView スクリーナーCSVの「〜 1日」付きカラム名に対応
+        elif "sma" in lower and "単純移動平均" in c and "(20)" in c:
+            col_map[c] = "SMA20"
+        elif "sma" in lower and "単純移動平均" in c and "(50)" in c:
+            col_map[c] = "SMA50"
+        elif "sma" in lower and "単純移動平均" in c and "(200)" in c:
+            col_map[c] = "SMA200"
+        elif "rsi" in lower and "相対力指数" in c:
             col_map[c] = "RSI"
+        elif "adx" in lower and "平均方向性指数" in c:
+            col_map[c] = "ADX"
+        elif "macd" in lower and "移動平均収束拡散" in c and "level" in lower:
+            col_map[c] = "MACD.macd"
+        elif "macd" in lower and "移動平均収束拡散" in c and "signal" in lower:
+            col_map[c] = "MACD.signal"
         elif _re.match(r"mom\s*\(モメンタム\)\s*\(10\)", lower):
             col_map[c] = "Momentum"
         elif _re.match(r"ao\s*\(オーサム・オシレーター\)", lower):
@@ -187,34 +199,10 @@ def _convert_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_snapshot(filepath: str | Path, technical_filepath: str | Path | None = None) -> pd.DataFrame:
-    """
-    TradingView スクリーナー CSV を読み込み、正規化する。
-    technical_filepath が指定された場合、テクニカル指標CSVをTickerでマージする。
-    """
+def load_snapshot(filepath: str | Path) -> pd.DataFrame:
+    """TradingView スクリーナー CSV を読み込み、正規化する。"""
     df = pd.read_csv(filepath)
     df = _normalize_columns(df)
-
-    # テクニカル指標CSVをマージ
-    if technical_filepath is not None:
-        tech_df = pd.read_csv(technical_filepath)
-        tech_df = _normalize_columns(tech_df)
-        tech_df = _convert_numeric(tech_df)
-
-        if "Ticker" in tech_df.columns:
-            # セクターCSV側に既に存在するテクニカルカラムは上書きしない
-            # （テクニカルCSV側のデータを優先する）
-            tech_cols = [c for c in tech_df.columns if c != "Ticker"]
-            # セクターCSV側にあるがNaNだらけの同名カラムを除去してからマージ
-            overlap_cols = [c for c in tech_cols if c in df.columns]
-            if overlap_cols:
-                df = df.drop(columns=overlap_cols)
-
-            df = df.merge(tech_df[["Ticker"] + tech_cols], on="Ticker", how="left")
-            print(f"  Merged technical data from {Path(technical_filepath).name} "
-                  f"({len(tech_df)} rows, cols: {tech_cols})")
-        else:
-            print(f"  Warning: Technical CSV {technical_filepath} has no Ticker column, skipping merge")
 
     # 必須カラムチェック
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
@@ -222,6 +210,11 @@ def load_snapshot(filepath: str | Path, technical_filepath: str | Path | None = 
         print(f"  Warning: missing columns {missing} in {filepath}")
 
     df = _convert_numeric(df)
+
+    # Sector カラムが存在しない場合は空のDataFrameを返す
+    if "Sector" not in df.columns:
+        print(f"  Skipping {filepath} (no Sector column)")
+        return pd.DataFrame()
 
     # Sector が空の行を除外
     df = df.dropna(subset=["Sector"])
@@ -240,48 +233,41 @@ def extract_date_from_filename(filepath: str | Path) -> str:
     return name
 
 
-def is_technical_file(filepath: str | Path) -> bool:
-    """ファイル名が Technical で始まるかどうか判定する"""
-    return Path(filepath).name.lower().startswith("technical")
-
-
-def pair_snapshot_files(csv_files: list[Path]) -> list[tuple[Path, Optional[Path]]]:
+def _deduplicate_by_date(csv_files: list[Path]) -> list[Path]:
     """
-    セクターCSVとテクニカルCSVを日付でペアリングする。
-
-    Returns:
-        list of (sector_csv, technical_csv_or_None) tuples, sorted by date.
+    同日のCSVが複数ある場合、必須カラムを最も多く含むファイルだけを残す。
     """
-    sector_files: dict[str, list[Path]] = {}
-    tech_files: dict[str, list[Path]] = {}
-
+    from collections import defaultdict
+    by_date: dict[str, list[Path]] = defaultdict(list)
     for f in csv_files:
-        date = extract_date_from_filename(f)
-        if is_technical_file(f):
-            tech_files.setdefault(date, []).append(f)
+        by_date[extract_date_from_filename(f)].append(f)
+
+    result: list[Path] = []
+    for date in sorted(by_date.keys()):
+        files = by_date[date]
+        if len(files) == 1:
+            result.append(files[0])
         else:
-            sector_files.setdefault(date, []).append(f)
-
-    # 日付ごとにペアリング
-    pairs: list[tuple[Path, Optional[Path]]] = []
-    all_dates = sorted(set(list(sector_files.keys()) + list(tech_files.keys())))
-
-    for date in all_dates:
-        s_files = sector_files.get(date, [])
-        t_files = tech_files.get(date, [])
-
-        if not s_files:
-            # テクニカルのみ（セクター無し）はスキップ
-            if t_files:
-                print(f"  Skipping Technical-only file(s) for {date} (no matching sector CSV)")
-            continue
-
-        for sf in s_files:
-            # 同日のテクニカルファイルがあればペアリング
-            tf = t_files[0] if t_files else None
-            pairs.append((sf, tf))
-
-    return pairs
+            # 各ファイルのヘッダーを読み、必須カラムのカバー率で選定
+            best_file = files[0]
+            best_score = -1
+            for f in files:
+                try:
+                    hdr = pd.read_csv(f, nrows=0)
+                    hdr = _normalize_columns(hdr)
+                    score = sum(1 for c in REQUIRED_COLS if c in hdr.columns)
+                    # Sector カラムがないファイルは除外
+                    if "Sector" not in hdr.columns:
+                        score = -1
+                except Exception:
+                    score = -1
+                if score > best_score:
+                    best_score = score
+                    best_file = f
+            print(f"  Date {date}: {len(files)} files, selected {best_file.name} "
+                  f"({best_score}/{len(REQUIRED_COLS)} required cols)")
+            result.append(best_file)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1040,22 +1026,21 @@ def main():
         print(f"Error: No CSV files found in {snap_dir}")
         sys.exit(1)
 
-    # セクターCSV と テクニカルCSV をペアリング
-    pairs = pair_snapshot_files(csv_files)
-    sector_count = len(pairs)
-    tech_count = sum(1 for _, t in pairs if t is not None)
-    print(f"\n  Found {len(csv_files)} CSV file(s) in {snap_dir}")
-    print(f"  Paired: {sector_count} sector file(s), {tech_count} technical file(s)")
+    # 同日のファイルが複数ある場合、必須カラムが最も多いものだけを使う
+    csv_files = _deduplicate_by_date(csv_files)
+
+    print(f"\n  Found {len(csv_files)} snapshot(s) in {snap_dir}")
 
     # 全スナップショットを処理
     all_metrics: list[list[SectorMetrics]] = []
     latest_df: Optional[pd.DataFrame] = None
 
-    for sector_csv, tech_csv in pairs:
-        date_label = extract_date_from_filename(sector_csv)
-        tech_info = f" + {tech_csv.name}" if tech_csv else ""
-        print(f"  Processing: {sector_csv.name}{tech_info} ({date_label})")
-        df = load_snapshot(sector_csv, technical_filepath=tech_csv)
+    for csvf in csv_files:
+        date_label = extract_date_from_filename(csvf)
+        print(f"  Processing: {csvf.name} ({date_label})")
+        df = load_snapshot(csvf)
+        if df.empty:
+            continue
         metrics = compute_sector_metrics(df, date_label)
         all_metrics.append(metrics)
         latest_df = df
