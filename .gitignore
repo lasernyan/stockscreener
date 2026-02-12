@@ -4,6 +4,9 @@
 # Node
 node_modules/
 
+# Python
+__pycache__/
+
 # Research output data
 data/context-research/*.json
 data/context-research/*.txt
