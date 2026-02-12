@@ -8,13 +8,12 @@ Strategy:
   - Filter: ADX for volatility regime, EMA(200) for macro trend
   - Exit: ATR-based stop-loss, trailing stop, and breakeven mechanisms
 
-Uses yfinance to fetch BTC-USD data on a 15-minute timeframe.
-Falls back to synthetic data if network is unavailable or history is limited.
-
-Note: yfinance limits 15m intraday data to ~60 days. For longer backtests
-the script automatically generates synthetic data via geometric Brownian motion.
+Uses CCXT to fetch BTC/USDT data from Binance on a 15-minute timeframe,
+enabling multi-year historical data (no 60-day limit like yfinance).
+Falls back to synthetic data if network is unavailable.
 """
 
+import time
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -23,17 +22,18 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 try:
-    import yfinance as yf
-    HAS_YFINANCE = True
+    import ccxt
+    HAS_CCXT = True
 except ImportError:
-    HAS_YFINANCE = False
+    HAS_CCXT = False
 
 
 # ── Configuration ──────────────────────────────────────────────────────────
-TICKER = "BTC-USD"
+SYMBOL = "BTC/USDT"                 # CCXT symbol (Binance spot)
+EXCHANGE_ID = "binance"             # CCXT exchange identifier
 START_DATE = "2020-01-01"
 END_DATE = "2025-12-31"
-INTERVAL = "15m"                    # 15-minute bars
+TIMEFRAME = "15m"                   # 15-minute bars
 INITIAL_CAPITAL = 100_000.0
 RISK_PER_TRADE = 0.01              # 1% risk per trade (lower for crypto volatility)
 
@@ -124,33 +124,98 @@ def generate_synthetic_btc_data(start: str, end: str) -> pd.DataFrame:
     return df
 
 
-def fetch_data(ticker: str, start: str, end: str, interval: str) -> pd.DataFrame:
-    """Download OHLCV data from Yahoo Finance, fall back to synthetic data.
+def fetch_ohlcv_ccxt(symbol: str, exchange_id: str, timeframe: str,
+                     start: str, end: str) -> pd.DataFrame:
+    """Fetch historical OHLCV data from a CCXT exchange with pagination.
 
-    Note: yfinance limits 15m intraday data to approximately 60 days of history.
-    For longer backtest periods, synthetic data is generated automatically.
+    CCXT returns at most 1000-1500 candles per request, so we loop
+    from `start` to `end` in chunks, respecting the exchange rate limit.
     """
-    print(f"Fetching {ticker} ({interval}) data from {start} to {end} ...")
-    if HAS_YFINANCE:
+    exchange_class = getattr(ccxt, exchange_id)
+    exchange = exchange_class({"enableRateLimit": True, "timeout": 30000})
+    exchange.load_markets()
+
+    since = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
+    end_ms = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000)
+    limit = 1000  # candles per request (Binance max = 1000 for 15m)
+
+    all_ohlcv = []
+    print(f"  Fetching from {exchange_id.upper()} ({symbol} {timeframe}) ...")
+    max_retries = 4
+    while since < end_ms:
+        ohlcv = None
+        for attempt in range(max_retries):
+            try:
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+                break
+            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
+                wait = 2 ** (attempt + 1)
+                print(f"\n  Network error (attempt {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    print(f"  Retrying in {wait}s ...")
+                    time.sleep(wait)
+                else:
+                    print(f"  Max retries reached. Aborting fetch.")
+                    return pd.DataFrame()
+            except Exception as e:
+                print(f"\n  CCXT fetch error: {e}")
+                return pd.DataFrame()
+        if ohlcv is None:
+            break
+
+        if not ohlcv:
+            break
+
+        all_ohlcv.extend(ohlcv)
+        last_ts = ohlcv[-1][0]
+        # Advance past the last fetched candle
+        since = last_ts + 1
+
+        # Progress indicator
+        fetched_date = pd.Timestamp(last_ts, unit="ms", tz="UTC").strftime("%Y-%m-%d")
+        print(f"\r  ... fetched up to {fetched_date}  ({len(all_ohlcv):,} bars)", end="", flush=True)
+
+        # Respect rate limit
+        time.sleep(exchange.rateLimit / 1000)
+
+    print()  # newline after progress
+
+    if not all_ohlcv:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_ohlcv, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df.set_index("timestamp", inplace=True)
+    df.index = df.index.tz_localize(None)  # Remove tz for consistency
+
+    # Filter to requested date range
+    df = df[(df.index >= start) & (df.index <= end)]
+    df = df[~df.index.duplicated(keep="first")]
+    df.sort_index(inplace=True)
+    return df
+
+
+def fetch_data(symbol: str, exchange_id: str, timeframe: str,
+               start: str, end: str) -> pd.DataFrame:
+    """Fetch OHLCV via CCXT (multi-year capable), fall back to synthetic data."""
+    print(f"Fetching {symbol} ({timeframe}) data from {start} to {end} ...")
+    if HAS_CCXT:
         try:
-            df = yf.download(ticker, start=start, end=end,
-                             interval=interval, auto_adjust=True)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+            df = fetch_ohlcv_ccxt(symbol, exchange_id, timeframe, start, end)
             if not df.empty and len(df) > 100:
                 df.dropna(inplace=True)
-                print(f"  Fetched {len(df)} bars from Yahoo Finance.\n")
+                print(f"  Fetched {len(df):,} bars from {exchange_id.upper()}.\n")
                 return df
             else:
-                print(f"  Insufficient data from Yahoo Finance ({len(df)} bars).")
+                print(f"  Insufficient data from {exchange_id.upper()} ({len(df)} bars).")
         except Exception as e:
-            print(f"  Download failed: {e}")
+            print(f"  CCXT download failed: {e}")
     else:
-        print("  yfinance not available.")
+        print("  ccxt not available.")
 
     # Fallback to synthetic data
     df = generate_synthetic_btc_data(start, end)
-    print(f"  Generated {len(df)} synthetic 15m bars.\n")
+    print(f"  Generated {len(df):,} synthetic 15m bars.\n")
     return df
 
 
@@ -642,7 +707,7 @@ def plot_results(df: pd.DataFrame, equity_df: pd.DataFrame,
 
 # ── Main ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    data = fetch_data(TICKER, START_DATE, END_DATE, INTERVAL)
+    data = fetch_data(SYMBOL, EXCHANGE_ID, TIMEFRAME, START_DATE, END_DATE)
     signals = compute_signals(data)
 
     print(f"Total bars after indicator warmup: {len(signals)}")
