@@ -87,7 +87,7 @@ class TradeCandidate:
 REQUIRED_COLS = [
     "Ticker", "Sector", "Close", "Change %", "Volume",
     "Relative Volume", "Market Cap", "SMA20", "SMA50", "SMA200",
-    "RSI", "MACD.macd", "MACD.signal", "ADX",
+    "RSI", "MACD.macd", "ADX",
 ]
 
 
@@ -108,6 +108,8 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "希薄化EPS, 直近12ヶ月": "EPS (TTM)",
         "希薄化EPS成長率 %, 直近12ヶ月前年比": "EPS Growth %",
         "配当利回り %, 直近12ヶ月": "Dividend Yield %",
+        "価格 - 通貨": "Currency",
+        "時価総額 - 通貨": "Market Cap Currency",
         # テクニカル指標の日本語カラム (直接指標値)
         "単純移動平均線 (20)": "SMA20",
         "単純移動平均線 (50)": "SMA50",
@@ -199,6 +201,32 @@ def _convert_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def detect_market(df: pd.DataFrame) -> str:
+    """
+    DataFrameの通貨カラムからマーケットを判別する。
+    Returns: "US", "JP", or "OTHER"
+    """
+    if "Currency" not in df.columns:
+        return "US"  # デフォルト
+    currencies = df["Currency"].dropna().str.upper()
+    if currencies.empty:
+        return "US"
+    most_common = currencies.mode().iloc[0]
+    if most_common == "JPY":
+        return "JP"
+    elif most_common == "USD":
+        return "US"
+    else:
+        return "OTHER"
+
+
+MARKET_LABELS = {
+    "US": "US Stocks (米国株)",
+    "JP": "JP Stocks (日本株)",
+    "OTHER": "Other Markets",
+}
+
+
 def load_snapshot(filepath: str | Path) -> pd.DataFrame:
     """TradingView スクリーナー CSV を読み込み、正規化する。"""
     df = pd.read_csv(filepath)
@@ -215,6 +243,9 @@ def load_snapshot(filepath: str | Path) -> pd.DataFrame:
     if "Sector" not in df.columns:
         print(f"  Skipping {filepath} (no Sector column)")
         return pd.DataFrame()
+
+    # マーケット判別
+    df["_market"] = detect_market(df)
 
     # Sector が空の行を除外
     df = df.dropna(subset=["Sector"])
@@ -233,38 +264,40 @@ def extract_date_from_filename(filepath: str | Path) -> str:
     return name
 
 
-def _deduplicate_by_date(csv_files: list[Path]) -> list[Path]:
+def _deduplicate_by_date_and_market(csv_files: list[Path]) -> list[Path]:
     """
-    同日のCSVが複数ある場合、必須カラムを最も多く含むファイルだけを残す。
+    同日・同マーケットのCSVが複数ある場合、必須カラムを最も多く含むファイルだけを残す。
+    異なるマーケット (US/JP) のファイルは別々に保持する。
     """
     from collections import defaultdict
-    by_date: dict[str, list[Path]] = defaultdict(list)
+
+    # (date, market) → files のマッピングを構築
+    key_to_files: dict[tuple[str, str], list[tuple[Path, int]]] = defaultdict(list)
     for f in csv_files:
-        by_date[extract_date_from_filename(f)].append(f)
+        date = extract_date_from_filename(f)
+        try:
+            hdr = pd.read_csv(f, nrows=5)
+            hdr = _normalize_columns(hdr)
+            score = sum(1 for c in REQUIRED_COLS if c in hdr.columns)
+            if "Sector" not in hdr.columns:
+                score = -1
+            market = detect_market(hdr)
+        except Exception:
+            score = -1
+            market = "US"
+        key_to_files[(date, market)].append((f, score))
 
     result: list[Path] = []
-    for date in sorted(by_date.keys()):
-        files = by_date[date]
-        if len(files) == 1:
-            result.append(files[0])
+    for (date, market), entries in sorted(key_to_files.items()):
+        # スコアが -1 のみのグループはスキップ
+        valid = [(f, s) for f, s in entries if s >= 0]
+        if not valid:
+            continue
+        if len(valid) == 1:
+            result.append(valid[0][0])
         else:
-            # 各ファイルのヘッダーを読み、必須カラムのカバー率で選定
-            best_file = files[0]
-            best_score = -1
-            for f in files:
-                try:
-                    hdr = pd.read_csv(f, nrows=0)
-                    hdr = _normalize_columns(hdr)
-                    score = sum(1 for c in REQUIRED_COLS if c in hdr.columns)
-                    # Sector カラムがないファイルは除外
-                    if "Sector" not in hdr.columns:
-                        score = -1
-                except Exception:
-                    score = -1
-                if score > best_score:
-                    best_score = score
-                    best_file = f
-            print(f"  Date {date}: {len(files)} files, selected {best_file.name} "
+            best_file, best_score = max(valid, key=lambda x: x[1])
+            print(f"  Date {date} [{market}]: {len(entries)} files, selected {best_file.name} "
                   f"({best_score}/{len(REQUIRED_COLS)} required cols)")
             result.append(best_file)
     return result
@@ -675,14 +708,18 @@ def print_sector_dashboard(
     all_metrics: list[list[SectorMetrics]],
     rotations: list[RotationSignal],
     candidates: list[TradeCandidate],
+    market_label: str = "",
 ):
     """ターミナル向けの分析レポートを出力"""
 
     latest = all_metrics[-1] if all_metrics else []
     ranked = sorted(latest, key=lambda m: m.composite_score, reverse=True)
 
+    title = "SECTOR ROTATION & FUND FLOW DASHBOARD"
+    if market_label:
+        title += f"  [{market_label}]"
     print("\n" + "=" * 80)
-    print("  SECTOR ROTATION & FUND FLOW DASHBOARD")
+    print(f"  {title}")
     print("=" * 80)
 
     # --- Sector Ranking ---
@@ -797,6 +834,7 @@ def plot_dashboard(
     rotations: list[RotationSignal],
     candidates: list[TradeCandidate],
     output_path: Optional[str] = None,
+    title_suffix: str = "",
 ):
     """matplotlibで分析ダッシュボードを描画する"""
     try:
@@ -816,7 +854,8 @@ def plot_dashboard(
     ranked = sorted(latest, key=lambda m: m.composite_score, reverse=True)
 
     fig = plt.figure(figsize=(20, 14))
-    fig.suptitle("Sector Rotation & Fund Flow Dashboard", fontsize=16, fontweight="bold", y=0.98)
+    fig.suptitle(f"Sector Rotation & Fund Flow Dashboard{title_suffix}",
+                 fontsize=16, fontweight="bold", y=0.98)
 
     # Grid: 3行 x 2列
     gs = fig.add_gridspec(3, 2, hspace=0.35, wspace=0.30,
@@ -959,6 +998,7 @@ def export_analysis_csv(
     all_metrics: list[list[SectorMetrics]],
     candidates: list[TradeCandidate],
     output_dir: str = "screener",
+    suffix: str = "",
 ):
     """分析結果をCSVとして出力する"""
     # Sector Metrics
@@ -968,7 +1008,7 @@ def export_analysis_csv(
             rows.append(vars(m))
     if rows:
         df_metrics = pd.DataFrame(rows)
-        path = os.path.join(output_dir, "sector_metrics.csv")
+        path = os.path.join(output_dir, f"sector_metrics{suffix}.csv")
         df_metrics.to_csv(path, index=False)
         print(f"  Sector metrics saved to: {path}")
 
@@ -990,7 +1030,7 @@ def export_analysis_csv(
                 "reasons": " | ".join(c.reasons),
             })
         df_cand = pd.DataFrame(cand_rows)
-        path = os.path.join(output_dir, "trade_candidates.csv")
+        path = os.path.join(output_dir, f"trade_candidates{suffix}.csv")
         df_cand.to_csv(path, index=False)
         print(f"  Trade candidates saved to: {path}")
 
@@ -1026,44 +1066,81 @@ def main():
         print(f"Error: No CSV files found in {snap_dir}")
         sys.exit(1)
 
-    # 同日のファイルが複数ある場合、必須カラムが最も多いものだけを使う
-    csv_files = _deduplicate_by_date(csv_files)
+    # 同日・同マーケットのファイルが複数ある場合、最も完全なものだけを使う
+    csv_files = _deduplicate_by_date_and_market(csv_files)
 
     print(f"\n  Found {len(csv_files)} snapshot(s) in {snap_dir}")
 
-    # 全スナップショットを処理
-    all_metrics: list[list[SectorMetrics]] = []
-    latest_df: Optional[pd.DataFrame] = None
-
+    # 全スナップショットを読み込み、マーケット別に分類
+    loaded: list[tuple[str, str, pd.DataFrame]] = []  # (date, market, df)
     for csvf in csv_files:
         date_label = extract_date_from_filename(csvf)
-        print(f"  Processing: {csvf.name} ({date_label})")
+        print(f"  Loading: {csvf.name} ({date_label})")
         df = load_snapshot(csvf)
         if df.empty:
             continue
-        metrics = compute_sector_metrics(df, date_label)
-        all_metrics.append(metrics)
-        latest_df = df
+        market = df["_market"].iloc[0] if "_market" in df.columns else "US"
+        loaded.append((date_label, market, df))
 
-    # ローテーション検出
-    rotations = detect_rotation(all_metrics, threshold=args.threshold)
+    # マーケット別にグループ化
+    from collections import defaultdict
+    market_data: dict[str, list[tuple[str, pd.DataFrame]]] = defaultdict(list)
+    for date_label, market, df in loaded:
+        market_data[market].append((date_label, df))
 
-    # 売買候補生成
-    latest_rotation = rotations[-1] if rotations else None
-    candidates = generate_trade_signals(
-        latest_df, all_metrics[-1], latest_rotation, top_n=args.top
-    )
+    markets = sorted(market_data.keys())
+    print(f"  Markets detected: {', '.join(MARKET_LABELS.get(m, m) for m in markets)}")
 
-    # レポート出力
-    print_sector_dashboard(all_metrics, rotations, candidates)
+    # マーケットごとに分析
+    for market in markets:
+        snapshots = market_data[market]
+        label = MARKET_LABELS.get(market, market)
 
-    # チャート
-    if not args.no_chart:
-        plot_dashboard(all_metrics, rotations, candidates, args.out)
+        print(f"\n{'#' * 80}")
+        print(f"  MARKET: {label}")
+        print(f"{'#' * 80}")
 
-    # CSV 出力
-    if args.export_csv:
-        export_analysis_csv(all_metrics, candidates)
+        all_metrics: list[list[SectorMetrics]] = []
+        latest_df: Optional[pd.DataFrame] = None
+
+        for date_label, df in snapshots:
+            print(f"  Processing: {date_label} ({len(df)} stocks)")
+            metrics = compute_sector_metrics(df, date_label)
+            all_metrics.append(metrics)
+            latest_df = df
+
+        if not all_metrics:
+            print("  No data to analyze.")
+            continue
+
+        # ローテーション検出
+        rotations = detect_rotation(all_metrics, threshold=args.threshold)
+
+        # 売買候補生成
+        latest_rotation = rotations[-1] if rotations else None
+        candidates = generate_trade_signals(
+            latest_df, all_metrics[-1], latest_rotation, top_n=args.top
+        )
+
+        # レポート出力
+        print_sector_dashboard(all_metrics, rotations, candidates, market_label=label)
+
+        # チャート
+        if not args.no_chart:
+            suffix = f"_{market.lower()}" if len(markets) > 1 else ""
+            chart_path = args.out
+            if chart_path:
+                base, ext = os.path.splitext(chart_path)
+                chart_path = f"{base}{suffix}{ext}"
+            else:
+                chart_path = f"screener/sector_dashboard{suffix}.png"
+            plot_dashboard(all_metrics, rotations, candidates, chart_path,
+                           title_suffix=f" — {label}")
+
+        # CSV 出力
+        if args.export_csv:
+            export_analysis_csv(all_metrics, candidates,
+                                output_dir="screener", suffix=f"_{market.lower()}")
 
 
 if __name__ == "__main__":
