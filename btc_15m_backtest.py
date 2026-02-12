@@ -14,6 +14,7 @@ Falls back to synthetic data if network is unavailable.
 """
 
 import time
+import os
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -34,6 +35,7 @@ EXCHANGE_ID = "binance"             # CCXT exchange identifier
 START_DATE = "2020-01-01"
 END_DATE = "2025-12-31"
 TIMEFRAME = "15m"                   # 15-minute bars
+OHLCV_CACHE_CSV = "btc_15m_ohlcv.csv"  # CSV cache for fetched OHLCV data
 INITIAL_CAPITAL = 100_000.0
 RISK_PER_TRADE = 0.01              # 1% risk per trade (lower for crypto volatility)
 
@@ -197,14 +199,37 @@ def fetch_ohlcv_ccxt(symbol: str, exchange_id: str, timeframe: str,
 
 def fetch_data(symbol: str, exchange_id: str, timeframe: str,
                start: str, end: str) -> pd.DataFrame:
-    """Fetch OHLCV via CCXT (multi-year capable), fall back to synthetic data."""
+    """Fetch OHLCV with 3-tier data source: CSV cache → CCXT → synthetic.
+
+    Priority:
+      1. CSV cache (btc_15m_ohlcv.csv) — instant, works offline/anywhere
+      2. CCXT live fetch from exchange — saves result to CSV cache
+      3. Synthetic GBM data — last resort when no network & no cache
+    """
     print(f"Fetching {symbol} ({timeframe}) data from {start} to {end} ...")
+
+    # ── Tier 1: CSV cache ──
+    if os.path.exists(OHLCV_CACHE_CSV):
+        print(f"  Loading cached OHLCV from {OHLCV_CACHE_CSV} ...")
+        df = pd.read_csv(OHLCV_CACHE_CSV, index_col=0, parse_dates=True)
+        df = df[(df.index >= start) & (df.index <= end)]
+        if not df.empty and len(df) > 100:
+            df.dropna(inplace=True)
+            print(f"  Loaded {len(df):,} bars from CSV cache.\n")
+            return df
+        else:
+            print(f"  CSV cache has insufficient data for requested range ({len(df)} bars).")
+
+    # ── Tier 2: CCXT live fetch ──
     if HAS_CCXT:
         try:
             df = fetch_ohlcv_ccxt(symbol, exchange_id, timeframe, start, end)
             if not df.empty and len(df) > 100:
                 df.dropna(inplace=True)
-                print(f"  Fetched {len(df):,} bars from {exchange_id.upper()}.\n")
+                # Save to CSV cache for future runs
+                df.to_csv(OHLCV_CACHE_CSV)
+                print(f"  Fetched {len(df):,} bars from {exchange_id.upper()}.")
+                print(f"  Saved OHLCV cache to {OHLCV_CACHE_CSV}\n")
                 return df
             else:
                 print(f"  Insufficient data from {exchange_id.upper()} ({len(df)} bars).")
@@ -213,7 +238,7 @@ def fetch_data(symbol: str, exchange_id: str, timeframe: str,
     else:
         print("  ccxt not available.")
 
-    # Fallback to synthetic data
+    # ── Tier 3: Synthetic fallback ──
     df = generate_synthetic_btc_data(start, end)
     print(f"  Generated {len(df):,} synthetic 15m bars.\n")
     return df
