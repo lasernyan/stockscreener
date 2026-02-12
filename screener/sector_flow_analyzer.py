@@ -201,23 +201,40 @@ def _convert_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _currency_to_market(currency: str) -> str:
+    """通貨コード → マーケットコード"""
+    c = str(currency).strip().upper()
+    if c == "JPY":
+        return "JP"
+    elif c == "USD":
+        return "US"
+    elif c in ("", "NAN"):
+        return "US"
+    else:
+        return "OTHER"
+
+
 def detect_market(df: pd.DataFrame) -> str:
     """
-    DataFrameの通貨カラムからマーケットを判別する。
+    DataFrameの通貨カラムから最頻マーケットを判別する (ファイル単位)。
     Returns: "US", "JP", or "OTHER"
     """
     if "Currency" not in df.columns:
-        return "US"  # デフォルト
+        return "US"
     currencies = df["Currency"].dropna().str.upper()
     if currencies.empty:
         return "US"
     most_common = currencies.mode().iloc[0]
-    if most_common == "JPY":
-        return "JP"
-    elif most_common == "USD":
-        return "US"
+    return _currency_to_market(most_common)
+
+
+def assign_market_per_row(df: pd.DataFrame) -> pd.DataFrame:
+    """各行の通貨カラムからマーケットを判別し _market 列に設定する。"""
+    if "Currency" in df.columns:
+        df["_market"] = df["Currency"].fillna("USD").apply(_currency_to_market)
     else:
-        return "OTHER"
+        df["_market"] = "US"
+    return df
 
 
 MARKET_LABELS = {
@@ -244,8 +261,8 @@ def load_snapshot(filepath: str | Path) -> pd.DataFrame:
         print(f"  Skipping {filepath} (no Sector column)")
         return pd.DataFrame()
 
-    # マーケット判別
-    df["_market"] = detect_market(df)
+    # 行単位でマーケット判別
+    df = assign_market_per_row(df)
 
     # Sector が空の行を除外
     df = df.dropna(subset=["Sector"])
@@ -1071,22 +1088,22 @@ def main():
 
     print(f"\n  Found {len(csv_files)} snapshot(s) in {snap_dir}")
 
-    # 全スナップショットを読み込み、マーケット別に分類
-    loaded: list[tuple[str, str, pd.DataFrame]] = []  # (date, market, df)
+    # 全スナップショットを読み込み、マーケット別に分割・分類
+    from collections import defaultdict
+    market_data: dict[str, list[tuple[str, pd.DataFrame]]] = defaultdict(list)
+
     for csvf in csv_files:
         date_label = extract_date_from_filename(csvf)
         print(f"  Loading: {csvf.name} ({date_label})")
         df = load_snapshot(csvf)
         if df.empty:
             continue
-        market = df["_market"].iloc[0] if "_market" in df.columns else "US"
-        loaded.append((date_label, market, df))
 
-    # マーケット別にグループ化
-    from collections import defaultdict
-    market_data: dict[str, list[tuple[str, pd.DataFrame]]] = defaultdict(list)
-    for date_label, market, df in loaded:
-        market_data[market].append((date_label, df))
+        # 1ファイル内のマーケットを行単位で分割
+        for market, mdf in df.groupby("_market"):
+            if not mdf.empty:
+                print(f"    → {MARKET_LABELS.get(market, market)}: {len(mdf)} stocks")
+                market_data[market].append((date_label, mdf))
 
     markets = sorted(market_data.keys())
     print(f"  Markets detected: {', '.join(MARKET_LABELS.get(m, m) for m in markets)}")
