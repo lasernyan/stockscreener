@@ -712,9 +712,12 @@ def generate_trade_signals(
                 volume_ratio=rvol,
             ))
 
-    # 強度でソートして top_n
-    candidates.sort(key=lambda c: c.strength, reverse=True)
-    return candidates[:top_n]
+    # LONG / SHORT を分離して各 top_n 件
+    longs = sorted([c for c in candidates if c.signal == "LONG"],
+                   key=lambda c: c.strength, reverse=True)[:top_n]
+    shorts = sorted([c for c in candidates if c.signal == "SHORT"],
+                    key=lambda c: c.strength, reverse=True)[:top_n]
+    return longs + shorts
 
 
 # ---------------------------------------------------------------------------
@@ -796,20 +799,26 @@ def print_sector_dashboard(
                     print(f"      {src} → {dst}  (強度: {stren:.1f})")
 
     # --- Trade Candidates ---
-    print(f"\n{'─' * 80}")
-    print("  TRADE CANDIDATES (売買候補)")
-    print(f"{'─' * 80}")
-    if not candidates:
-        print("  (該当なし)")
-    for i, c in enumerate(candidates, 1):
-        icon = "🔼" if c.signal == "LONG" else "🔽"
-        print(f"\n  {i}. {icon} {c.signal} {c.ticker} ({c.name})")
-        print(f"     Sector: {c.sector} / {c.industry}")
-        print(f"     Close: {c.close:.2f}  Chg: {c.change_pct:+.2f}%  "
-              f"RSI: {c.rsi:.1f}  RVOL: {c.volume_ratio:.2f}")
-        print(f"     Strength: {c.strength:.0f}/100")
-        for r in c.reasons:
-            print(f"       - {r}")
+    long_cands = [c for c in candidates if c.signal == "LONG"]
+    short_cands = [c for c in candidates if c.signal == "SHORT"]
+
+    for section_label, section_cands, icon in [
+        ("LONG CANDIDATES (買い候補)", long_cands, "🔼"),
+        ("SHORT CANDIDATES (売り候補)", short_cands, "🔽"),
+    ]:
+        print(f"\n{'─' * 80}")
+        print(f"  {section_label}")
+        print(f"{'─' * 80}")
+        if not section_cands:
+            print("  (該当なし)")
+        for i, c in enumerate(section_cands, 1):
+            print(f"\n  {i}. {icon} {c.signal} {c.ticker} ({c.name})")
+            print(f"     Sector: {c.sector} / {c.industry}")
+            print(f"     Close: {c.close:.2f}  Chg: {c.change_pct:+.2f}%  "
+                  f"RSI: {c.rsi:.1f}  RVOL: {c.volume_ratio:.2f}")
+            print(f"     Strength: {c.strength:.0f}/100")
+            for r in c.reasons:
+                print(f"       - {r}")
 
     print(f"\n{'=' * 80}\n")
 
@@ -870,13 +879,14 @@ def plot_dashboard(
     latest = all_metrics[-1] if all_metrics else []
     ranked = sorted(latest, key=lambda m: m.composite_score, reverse=True)
 
-    fig = plt.figure(figsize=(20, 14))
+    fig = plt.figure(figsize=(20, 18))
     fig.suptitle(f"Sector Rotation & Fund Flow Dashboard{title_suffix}",
                  fontsize=16, fontweight="bold", y=0.98)
 
-    # Grid: 3行 x 2列
-    gs = fig.add_gridspec(3, 2, hspace=0.35, wspace=0.30,
-                          left=0.06, right=0.96, top=0.93, bottom=0.04)
+    # Grid: 4行 x 2列
+    gs = fig.add_gridspec(4, 2, hspace=0.35, wspace=0.30,
+                          left=0.06, right=0.96, top=0.94, bottom=0.03,
+                          height_ratios=[1, 1, 1, 0.8])
 
     sectors = [m.sector for m in ranked]
     scs_values = [m.composite_score for m in ranked]
@@ -960,31 +970,56 @@ def plot_dashboard(
                  ha="center", va="center", fontsize=12, color="gray")
         ax5.set_title("SCS Time-Series", fontweight="bold")
 
-    # 6) Trade Candidates table
-    ax6 = fig.add_subplot(gs[2, 1])
+    # 6) LONG Candidates table
+    long_cands = [c for c in candidates if c.signal == "LONG"]
+    ax6 = fig.add_subplot(gs[3, 0])
     ax6.axis("off")
-    ax6.set_title("Top Trade Candidates", fontweight="bold")
-    if candidates:
+    ax6.set_title("LONG Candidates (買い候補)", fontweight="bold")
+    if long_cands:
         table_data = []
-        for c in candidates[:8]:
+        for c in long_cands[:8]:
             table_data.append([
-                c.signal, c.ticker, c.sector[:15],
+                c.ticker, c.sector[:15],
                 f"{c.close:.1f}", f"{c.change_pct:+.2f}%",
                 f"{c.rsi:.0f}", f"{c.strength:.0f}",
             ])
-        col_labels = ["Signal", "Ticker", "Sector", "Close", "Chg%", "RSI", "Score"]
+        col_labels = ["Ticker", "Sector", "Close", "Chg%", "RSI", "Score"]
         table = ax6.table(cellText=table_data, colLabels=col_labels,
                           loc="center", cellLoc="center")
         table.auto_set_font_size(False)
         table.set_fontsize(8)
         table.scale(1, 1.4)
-        # 色付け
-        for i, c in enumerate(candidates[:8]):
-            color = "#d5f5e3" if c.signal == "LONG" else "#fadbd8"
+        for i in range(len(long_cands[:8])):
             for j in range(len(col_labels)):
-                table[(i + 1, j)].set_facecolor(color)
+                table[(i + 1, j)].set_facecolor("#d5f5e3")
     else:
-        ax6.text(0.5, 0.5, "No candidates", ha="center", va="center",
+        ax6.text(0.5, 0.5, "No LONG candidates", ha="center", va="center",
+                 fontsize=12, color="gray")
+
+    # 7) SHORT Candidates table
+    short_cands = [c for c in candidates if c.signal == "SHORT"]
+    ax7 = fig.add_subplot(gs[3, 1])
+    ax7.axis("off")
+    ax7.set_title("SHORT Candidates (売り候補)", fontweight="bold")
+    if short_cands:
+        table_data = []
+        for c in short_cands[:8]:
+            table_data.append([
+                c.ticker, c.sector[:15],
+                f"{c.close:.1f}", f"{c.change_pct:+.2f}%",
+                f"{c.rsi:.0f}", f"{c.strength:.0f}",
+            ])
+        col_labels = ["Ticker", "Sector", "Close", "Chg%", "RSI", "Score"]
+        table = ax7.table(cellText=table_data, colLabels=col_labels,
+                          loc="center", cellLoc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        table.scale(1, 1.4)
+        for i in range(len(short_cands[:8])):
+            for j in range(len(col_labels)):
+                table[(i + 1, j)].set_facecolor("#fadbd8")
+    else:
+        ax7.text(0.5, 0.5, "No SHORT candidates", ha="center", va="center",
                  fontsize=12, color="gray")
 
     # Save
