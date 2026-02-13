@@ -26,6 +26,23 @@ When the user uploads a CSV file (TradingView screener export), automatically pe
 - `screener/sector_metrics*.csv` — Exported sector metrics
 - `screener/trade_candidates*.csv` — Exported trade candidates
 
+## Quick Analyze Script
+
+For users who cannot upload files directly, use the one-command script:
+
+```bash
+# CSVファイルを指定して取り込み＆分析
+./screener/analyze.sh ~/Downloads/Stock_2026-02-13_*.csv
+
+# 複数ファイルをまとめて取り込み
+./screener/analyze.sh file1.csv file2.csv file3.csv
+
+# 既存データで再分析（引数なし）
+./screener/analyze.sh
+```
+
+When the user mentions running this script or provides a CSV file path, assist with running `screener/analyze.sh` with the appropriate arguments.
+
 ## CSV Format
 
 Input CSVs are TradingView screener exports containing columns like:
