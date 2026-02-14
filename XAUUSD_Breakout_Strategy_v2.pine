@@ -1,0 +1,394 @@
+// This Pine Script(TM) v6 indicator/strategy is subject to the Terms of Use:
+// https://www.tradingview.com/pine-script-docs/
+// XAUUSD Breakout Strategy v2 (Improved)
+// =======================================
+// 20-period channel breakout with:
+//   - Correct entry price tracking via strategy.opentrades
+//   - 200 MA trend filter
+//   - ADX regime filter (with direction confirmation)
+//   - Session filter (avoid Asian session false breakouts)
+//   - ATR trailing stop + breakeven stop
+//   - Risk-based position sizing
+//   - SL cooldown (anti-whipsaw)
+//   - Volume/momentum confirmation
+//   - Long-only bias option
+
+//@version=6
+strategy("XAUUSD Breakout v2", overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.cash,
+     default_qty_value=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=50,
+     calc_on_every_tick=false)
+
+// ── Inputs: Core Strategy ────────────────────────────────────────────────
+grp_core = "Core Strategy"
+lookback       = input.int(20, "Channel Lookback", minval=5, maxval=100, group=grp_core)
+atrPeriod      = input.int(14, "ATR Period", minval=1, maxval=50, group=grp_core)
+atrSlMult      = input.float(1.5, "SL Multiplier (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_core)
+atrTpMult      = input.float(3.0, "TP Multiplier (ATR)", minval=1.0, maxval=10.0, step=0.1, group=grp_core,
+                     tooltip="Used only when trailing stop is disabled")
+
+// ── Inputs: Risk Management ──────────────────────────────────────────────
+grp_risk = "Risk Management"
+riskPercent    = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=5.0, step=0.1, group=grp_risk,
+                     tooltip="Percentage of equity risked per trade")
+maxDailyLoss   = input.float(3.0, "Max Daily Loss (%)", minval=1.0, maxval=10.0, step=0.5, group=grp_risk,
+                     tooltip="Stop trading for the day after this % loss")
+
+// ── Inputs: Trend Filter ─────────────────────────────────────────────────
+grp_trend = "Trend Filter"
+useTrendFilter = input.bool(true, "Enable 200 MA Trend Filter", group=grp_trend)
+trendMaPeriod  = input.int(200, "Trend MA Period", minval=50, maxval=500, group=grp_trend)
+
+// ── Inputs: Trailing Stop ────────────────────────────────────────────────
+grp_trail = "Trailing Stop"
+useTrailingStop    = input.bool(true, "Enable Trailing Stop", group=grp_trail)
+trailActivationATR = input.float(2.0, "Trail Activation (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_trail)
+trailDistanceATR   = input.float(2.0, "Trail Distance (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_trail,
+                         tooltip="Tightened from 3.0 to 2.0 to preserve more profit")
+
+// ── Inputs: Breakeven Stop ───────────────────────────────────────────────
+grp_be = "Breakeven Stop"
+useBreakevenStop = input.bool(true, "Enable Breakeven Stop", group=grp_be)
+breakevenATR     = input.float(1.5, "Breakeven Trigger (ATR)", minval=0.5, maxval=5.0, step=0.1, group=grp_be)
+
+// ── Inputs: Cooldown ─────────────────────────────────────────────────────
+grp_cd = "Cooldown"
+cooldownBars = input.int(5, "Cooldown Bars After SL", minval=0, maxval=20, group=grp_cd)
+
+// ── Inputs: ADX Filter ───────────────────────────────────────────────────
+grp_adx = "ADX Filter"
+useAdxFilter = input.bool(true, "Enable ADX Filter", group=grp_adx)
+adxPeriod    = input.int(14, "ADX Period", minval=5, maxval=50, group=grp_adx)
+adxThreshold = input.int(20, "ADX Threshold", minval=10, maxval=50, group=grp_adx)
+adxRising    = input.bool(true, "Require ADX Rising", group=grp_adx,
+                   tooltip="ADX must be increasing to confirm strengthening trend")
+
+// ── Inputs: Session Filter ───────────────────────────────────────────────
+grp_session = "Session Filter"
+useSessionFilter = input.bool(true, "Enable Session Filter", group=grp_session,
+                       tooltip="Avoid entries during low-liquidity Asian session")
+sessionStart     = input.int(7, "Session Start (UTC Hour)", minval=0, maxval=23, group=grp_session)
+sessionEnd       = input.int(20, "Session End (UTC Hour)", minval=0, maxval=23, group=grp_session)
+
+// ── Inputs: Volume/Momentum Filter ──────────────────────────────────────
+grp_vol = "Volume / Momentum Filter"
+useVolumeFilter = input.bool(false, "Enable Volume Filter", group=grp_vol,
+                      tooltip="Enable if your XAUUSD data provides reliable volume")
+volMultiplier   = input.float(1.2, "Volume Multiplier", minval=0.5, maxval=3.0, step=0.1, group=grp_vol)
+useMomentumFilter = input.bool(true, "Enable Momentum Filter", group=grp_vol,
+                        tooltip="Require breakout bar to have meaningful ATR-relative size")
+momentumThreshold = input.float(0.3, "Breakout Strength (ATR ratio)", minval=0.1, maxval=1.0, step=0.05, group=grp_vol)
+
+// ── Inputs: Direction Bias ───────────────────────────────────────────────
+grp_dir = "Direction Bias"
+longOnly = input.bool(false, "Long Only (No Shorts)", group=grp_dir)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INDICATOR CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Channel breakout levels (shifted by 1 bar to avoid look-ahead)
+upperChannel = ta.highest(high, lookback)[1]
+lowerChannel = ta.lowest(low, lookback)[1]
+
+// ATR
+atrValue = ta.atr(atrPeriod)
+
+// 200-period SMA
+ma200 = ta.sma(close, trendMaPeriod)
+
+// ADX via DMI
+[diPlus, diMinus, adxValue] = ta.dmi(adxPeriod, adxPeriod)
+
+// Volume average
+volSma = ta.sma(volume, 20)
+
+// Session check (UTC)
+currentHour = hour(time, "UTC")
+inSession = useSessionFilter ? (sessionStart < sessionEnd ?
+             (currentHour >= sessionStart and currentHour < sessionEnd) :
+             (currentHour >= sessionStart or currentHour < sessionEnd)) : true
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL GENERATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Base breakout signals
+baseLong  = close > upperChannel
+baseShort = close < lowerChannel
+
+// Apply trend filter
+trendLongOk  = useTrendFilter ? close > ma200 : true
+trendShortOk = useTrendFilter ? close < ma200 : true
+
+// Apply ADX filter (with optional rising confirmation)
+adxDirectionOk = adxRising ? adxValue > adxValue[3] : true
+adxOk = useAdxFilter ? (adxValue > adxThreshold and adxDirectionOk) : true
+
+// Volume filter
+volOk = useVolumeFilter ? (volume > volSma * volMultiplier) : true
+
+// Momentum/breakout strength filter
+longBreakoutStrength  = baseLong  ? (close - upperChannel) / atrValue : 0.0
+shortBreakoutStrength = baseShort ? (lowerChannel - close) / atrValue : 0.0
+momentumLongOk  = useMomentumFilter ? longBreakoutStrength  > momentumThreshold : true
+momentumShortOk = useMomentumFilter ? shortBreakoutStrength > momentumThreshold : true
+
+// Combined signals
+longSignal  = baseLong  and trendLongOk  and adxOk and volOk and momentumLongOk  and inSession
+shortSignal = baseShort and trendShortOk and adxOk and volOk and momentumShortOk and inSession and not longOnly
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE VARIABLES (persist across bars)
+// ═══════════════════════════════════════════════════════════════════════════
+
+var float entryPrice        = na
+var float currentSL         = na
+var float bestPrice         = na
+var float trailATR          = na
+var bool  trailingActive    = false
+var bool  breakevenHit      = false
+var int   cooldownRemaining = 0
+var bool  wasInPosition     = false
+var bool  entryPriceSet     = false
+var float dailyPnL          = 0.0
+var int   lastTradeDay       = 0
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DAILY P&L TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+currentDay = dayofmonth(time)
+if currentDay != lastTradeDay
+    dailyPnL     := 0.0
+    lastTradeDay := currentDay
+
+// Update daily P&L from closed trades
+if strategy.closedtrades > 0
+    lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if strategy.closedtrades > strategy.closedtrades[1]
+        dailyPnL := dailyPnL + lastTradeProfit
+
+dailyLossLimitHit = dailyPnL <= -(strategy.equity * maxDailyLoss / 100)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORRECT ENTRY PRICE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+// FIX: Use actual fill price from strategy.opentrades instead of close
+if strategy.position_size != 0 and not entryPriceSet
+    if strategy.opentrades > 0
+        entryPrice    := strategy.opentrades.entry_price(strategy.opentrades - 1)
+        slDistance      = atrSlMult * trailATR
+        if strategy.position_size > 0
+            currentSL := entryPrice - slDistance
+        else
+            currentSL := entryPrice + slDistance
+        bestPrice      := entryPrice
+        entryPriceSet  := true
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COOLDOWN MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Detect exit and determine if it was a SL hit
+justExited = wasInPosition and strategy.position_size == 0
+
+// Improved SL exit detection using actual exit price comparison
+wasSLExit = false
+if justExited and strategy.closedtrades > 0
+    lastExitPrice = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    lastExitProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    // If trade was a loss, it was likely a SL exit
+    wasSLExit := lastExitProfit < 0
+    // Reset state on any exit
+    entryPriceSet  := false
+    trailingActive := false
+    breakevenHit   := false
+
+if cooldownRemaining > 0
+    cooldownRemaining := cooldownRemaining - 1
+
+if wasSLExit
+    cooldownRemaining := cooldownBars
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RISK-BASED POSITION SIZING
+// ═══════════════════════════════════════════════════════════════════════════
+
+slDistanceForSizing = atrSlMult * atrValue
+riskAmount          = strategy.equity * riskPercent / 100.0
+qtyByRisk           = slDistanceForSizing > 0 ? riskAmount / slDistanceForSizing : 0
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC
+// ═══════════════════════════════════════════════════════════════════════════
+
+canEnter = strategy.position_size == 0
+         and cooldownRemaining == 0
+         and not na(atrValue)
+         and atrValue > 0
+         and not dailyLossLimitHit
+         and qtyByRisk > 0
+
+if canEnter and longSignal
+    // Store preliminary values; will be corrected on next bar with actual fill
+    entryPrice     := close
+    currentSL      := close - atrSlMult * atrValue
+    bestPrice      := close
+    trailATR       := atrValue
+    trailingActive := false
+    breakevenHit   := false
+    entryPriceSet  := false  // will be set on next bar with real fill price
+    strategy.entry("Long", strategy.long, qty=qtyByRisk)
+
+if canEnter and shortSignal
+    entryPrice     := close
+    currentSL      := close + atrSlMult * atrValue
+    bestPrice      := close
+    trailATR       := atrValue
+    trailingActive := false
+    breakevenHit   := false
+    entryPriceSet  := false
+    strategy.entry("Short", strategy.short, qty=qtyByRisk)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT: TRAILING STOP + BREAKEVEN
+// ═══════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size > 0  // LONG
+    // Update best price
+    bestPrice := math.max(nz(bestPrice), high)
+
+    // Breakeven: move SL to entry after breakevenATR * ATR move
+    if useBreakevenStop and not breakevenHit
+        if bestPrice >= entryPrice + breakevenATR * trailATR
+            currentSL    := math.max(nz(currentSL), entryPrice)
+            breakevenHit := true
+
+    // Trailing stop
+    if useTrailingStop
+        if trailingActive
+            trailSL   = bestPrice - trailDistanceATR * trailATR
+            currentSL := math.max(nz(currentSL), trailSL)
+        else
+            if bestPrice >= entryPrice + trailActivationATR * trailATR
+                trailingActive := true
+                trailSL        = bestPrice - trailDistanceATR * trailATR
+                currentSL      := math.max(nz(currentSL), trailSL)
+
+    // Set exit
+    if useTrailingStop
+        strategy.exit("Exit Long", "Long", stop=currentSL)
+    else
+        tpPrice = entryPrice + atrTpMult * trailATR
+        strategy.exit("Exit Long", "Long", stop=currentSL, limit=tpPrice)
+
+else if strategy.position_size < 0  // SHORT
+    // Update best price (lowest for shorts)
+    bestPrice := math.min(nz(bestPrice, close + 9999), low)
+
+    // Breakeven
+    if useBreakevenStop and not breakevenHit
+        if bestPrice <= entryPrice - breakevenATR * trailATR
+            currentSL    := math.min(nz(currentSL, close + 9999), entryPrice)
+            breakevenHit := true
+
+    // Trailing stop for shorts
+    if useTrailingStop
+        if trailingActive
+            trailSL   = bestPrice + trailDistanceATR * trailATR
+            currentSL := math.min(nz(currentSL, close + 9999), trailSL)
+        else
+            if bestPrice <= entryPrice - trailActivationATR * trailATR
+                trailingActive := true
+                trailSL        = bestPrice + trailDistanceATR * trailATR
+                currentSL      := math.min(nz(currentSL, close + 9999), trailSL)
+
+    // Set exit
+    if useTrailingStop
+        strategy.exit("Exit Short", "Short", stop=currentSL)
+    else
+        tpPrice = entryPrice - atrTpMult * trailATR
+        strategy.exit("Exit Short", "Short", stop=currentSL, limit=tpPrice)
+
+
+// Update position tracking for next bar
+wasInPosition := strategy.position_size != 0
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Channel lines
+plot(upperChannel, "Upper Channel", color=color.new(color.green, 60), linewidth=1, style=plot.style_stepline)
+plot(lowerChannel, "Lower Channel", color=color.new(color.red, 60), linewidth=1, style=plot.style_stepline)
+
+// 200 MA
+plot(useTrendFilter ? ma200 : na, "200 MA", color=color.orange, linewidth=2)
+
+// Dynamic stop-loss level (only when in position)
+slColor = strategy.position_size != 0 ? color.new(color.red, 30) : na
+plot(strategy.position_size != 0 ? currentSL : na, "Stop Loss", color=slColor,
+     linewidth=1, style=plot.style_circles)
+
+// Entry signals
+plotshape(canEnter and longSignal, "Long Signal", shape.triangleup,
+          location.belowbar, color.green, size=size.small)
+plotshape(canEnter and shortSignal, "Short Signal", shape.triangledown,
+          location.abovebar, color.red, size=size.small)
+
+// Cooldown indicator
+bgcolor(cooldownRemaining > 0 ? color.new(color.gray, 90) : na, title="Cooldown Zone")
+
+// Session out-of-bounds indicator
+bgcolor(not inSession ? color.new(color.orange, 95) : na, title="Out of Session")
+
+// Daily loss limit indicator
+bgcolor(dailyLossLimitHit ? color.new(color.red, 90) : na, title="Daily Loss Limit")
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ═══════════════════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "ADX", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, str.tostring(adxValue, "#.0"), text_color=adxOk ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 1, "ATR", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(atrValue, "#.00"), text_color=color.white, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "Session", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, inSession ? "Active" : "Inactive", text_color=inSession ? color.green : color.orange, text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "Cooldown", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(cooldownRemaining), text_color=cooldownRemaining > 0 ? color.red : color.green, text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "Daily P&L", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(dailyPnL, "#.00"), text_color=dailyPnL >= 0 ? color.green : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 5, "Risk/Trade", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(riskPercent, "#.0") + "%", text_color=color.white, text_size=size.small)
+
+    table.cell(infoTable, 0, 6, "Trailing", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 6, trailingActive ? "Active" : "Inactive", text_color=trailingActive ? color.green : color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 7, "Breakeven", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 7, breakevenHit ? "Hit" : "Pending", text_color=breakevenHit ? color.green : color.gray, text_size=size.small)
