@@ -342,7 +342,8 @@ def compute_sector_metrics(df: pd.DataFrame, date_label: str) -> list[SectorMetr
         n = len(group)
 
         # --- 基本統計 ---
-        avg_change = group["Change %"].mean() if "Change %" in group else 0.0
+        # ペニー株の極端な変動率を ±50% でクランプしてから平均
+        avg_change = group["Change %"].clip(lower=-50, upper=50).mean() if "Change %" in group else 0.0
         avg_rsi = group["RSI"].mean() if "RSI" in group else 50.0
         avg_adx = group["ADX"].mean() if "ADX" in group else 0.0
 
@@ -358,9 +359,11 @@ def compute_sector_metrics(df: pd.DataFrame, date_label: str) -> list[SectorMetr
 
         # --- 推定資金フロー ---
         # Fund Flow = Σ (Volume × Change% / 100)  出来高加重の方向性フロー
+        # ペニー株の極端な変動率（+999,900% 等）が全体を歪めるため ±50% でクランプ
         fund_flow = 0.0
         if "Volume" in group and "Change %" in group:
-            fund_flow = (group["Volume"] * group["Change %"] / 100.0).sum()
+            clamped_change = group["Change %"].clip(lower=-50, upper=50)
+            fund_flow = (group["Volume"] * clamped_change / 100.0).sum()
 
         avg_rvol = group["Relative Volume"].mean() if "Relative Volume" in group else 1.0
         total_mcap = group["Market Cap"].sum() if "Market Cap" in group else 0.0
