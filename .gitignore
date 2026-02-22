@@ -8,3 +8,4 @@ node_modules/
 data/context-research/*.json
 data/context-research/*.txt
 data/context-research/*.md
+__pycache__/
