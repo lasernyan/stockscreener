@@ -50,7 +50,7 @@ class EDINETFetcher:
         lookback_days: int   = 30,
         request_delay: float = 0.5,
     ):
-        self.api_key       = api_key or EDINET_API_KEY or os.getenv("EDINET_API_KEY", "55f1ffb3726749b3aeba0414982e486b")
+        self.api_key       = api_key or EDINET_API_KEY or os.getenv("EDINET_API_KEY", "")
         self.lookback_days = lookback_days
         self.request_delay = request_delay
         self.session       = requests.Session()
