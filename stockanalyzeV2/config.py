@@ -6,8 +6,8 @@ from typing import List, Dict
 
 
 # ─── API Keys (set via environment variables or edit here) ───────────────────
-EDINET_API_KEY = ""       # Set via env: EDINET_API_KEY
-ESTAT_API_KEY  = ""       # Set via env: ESTAT_APP_ID
+EDINET_API_KEY = "55f1ffb3726749b3aeba0414982e486b"       # Set via env: EDINET_API_KEY
+ESTAT_API_KEY  = "94bac6f9b910eab9d930c90853c3334d2aefcf37"       # Set via env: ESTAT_APP_ID
 
 
 # ─── Japan Sector → Ticker mapping (TOPIX-based ETFs or representative stocks) ─
