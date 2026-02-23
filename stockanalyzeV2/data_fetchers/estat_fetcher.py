@@ -41,7 +41,7 @@ class ESTATFetcher:
     """
 
     def __init__(self, app_id: str = "", request_delay: float = 0.5):
-        self.app_id        = app_id or ESTAT_API_KEY or os.getenv("ESTAT_APP_ID", "94bac6f9b910eab9d930c90853c3334d2aefcf37")
+        self.app_id        = app_id or ESTAT_API_KEY or os.getenv("ESTAT_APP_ID", "")
         self.request_delay = request_delay
         self.session       = requests.Session()
 
