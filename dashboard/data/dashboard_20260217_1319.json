@@ -1,0 +1,139 @@
+{
+  "generated_at": "2026-02-17T13:19:02.688877+00:00",
+  "generated_date": "2026-02-17",
+  "generated_time": "13:19 UTC",
+  "prices": {
+    "gold": {
+      "price": 5043.0,
+      "prev_close": 4922.0,
+      "change_pct": 2.46,
+      "high_52w": 5595.0,
+      "low_52w": 2833.0,
+      "ath": 5594.0,
+      "rsi": 47.07,
+      "sma_50": 4984.0,
+      "sma_200": 4200.0
+    },
+    "silver": {
+      "price": 76.62,
+      "prev_close": 77.43,
+      "change_pct": -1.05,
+      "ath": 121.88,
+      "high_52w": 109.83,
+      "low_52w": 26.57
+    },
+    "ratio": 65.8,
+    "ratio_historical_avg": "60-70"
+  },
+  "macro": {
+    "tips_10y": 1.77,
+    "nominal_10y": 4.04,
+    "bei_10y": 2.27,
+    "dxy": 96.9,
+    "dxy_change_1m_pct": -2.27,
+    "dxy_change_12m_pct": -9.21,
+    "ff_rate": "3.50-3.75%",
+    "ff_rate_cut_prob_march": 21.1,
+    "cpi_latest": 2.4
+  },
+  "etf_flows": {
+    "GLD": {
+      "aum_b": 167.66,
+      "flow_5d_m": -39.4,
+      "flow_1m_b": 2.57,
+      "flow_3m_b": 5.76,
+      "flow_1y_b": 24.86
+    },
+    "SLV": {
+      "aum_b": 54.88,
+      "flow_5d_m": -196.6,
+      "flow_1m_m": -253.9,
+      "flow_3m_b": 1.92,
+      "flow_1y_b": 3.59
+    }
+  },
+  "cot": {
+    "gold": {
+      "spec_net_long": 22800,
+      "managed_net_long": 12300,
+      "producers_short": 51284,
+      "swap_short": 232242,
+      "total_oi": 492103
+    },
+    "silver": {
+      "backwardation": true,
+      "shanghai_premium_pct": 10
+    }
+  },
+  "margin": {
+    "gold_pct": 9,
+    "silver_pct": 18
+  },
+  "central_banks": {
+    "pboc": {
+      "consecutive_months": 15,
+      "total_tonnes": 2308,
+      "reserve_pct": 9.6,
+      "usd_holdings_b": 682
+    },
+    "rbi": {
+      "total_tonnes": 876
+    },
+    "annual_demand_tonnes": 850
+  },
+  "china": {
+    "shfe_volume_tonnes_day": 540,
+    "etf_jan_flow_usd_b": 6.2,
+    "sge_withdrawal_tonnes": 126,
+    "household_gold_pct": 1.0
+  },
+  "silver_supply": {
+    "deficit_2026_moz": -67,
+    "cumulative_deficit_moz": -870
+  },
+  "trading_plan": {
+    "gold_long": {
+      "entry": "$5,050-5,075 breakout",
+      "alt_entry": "$4,940 (50SMA pullback)",
+      "tp1": 5200,
+      "tp2": 5480,
+      "tp3": 5595,
+      "sl": 4880
+    },
+    "gold_short": {
+      "entry": "$4,938 wedge breakdown",
+      "tp1": 4822,
+      "tp2": 4761,
+      "tp3": 4500,
+      "sl": 5080
+    },
+    "silver_long": {
+      "entry1": "$74-75 support bounce",
+      "entry2": "$79.42 trendline break",
+      "tp1": 85.0,
+      "tp2": 94.0,
+      "tp3": 100.0,
+      "sl": 69.5
+    },
+    "silver_short": {
+      "entry": "$74.00 breakdown",
+      "tp1": 70.0,
+      "tp2": 64.06,
+      "tp3": 55.0,
+      "sl": 79.5
+    }
+  },
+  "signals": {
+    "triple_factor": {
+      "real_yield": "bullish",
+      "dxy": "bullish",
+      "central_bank": "bullish",
+      "score": "3/3"
+    }
+  },
+  "previous": {
+    "gold_price": null,
+    "silver_price": null,
+    "date": null
+  }
+}
