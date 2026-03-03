@@ -652,10 +652,23 @@ def plot_gold_silver_dashboard(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import matplotlib.gridspec as mgridspec
+        import matplotlib.font_manager as fm
         try:
             import matplotlib_fontja  # noqa: F401
         except ImportError:
-            pass
+            # システムの日本語フォントを探して登録する
+            _JP_FONT_CANDIDATES = [
+                "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
+                "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                "/usr/share/fonts/opentype/unifont/unifont_jp.otf",
+            ]
+            for _fp in _JP_FONT_CANDIDATES:
+                if os.path.exists(_fp):
+                    fm.fontManager.addfont(_fp)
+                    _prop = fm.FontProperties(fname=_fp)
+                    matplotlib.rcParams["font.family"] = _prop.get_name()
+                    break
     except ImportError:
         print("  [Warning] matplotlib がインストールされていません。チャート生成をスキップします。")
         return
