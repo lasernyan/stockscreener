@@ -15,8 +15,12 @@ yfinance>=0.2.30          # 株価・ETF・暗号資産・コモディティ・F
 # --- HTTP Requests (EDINET / e-STAT API) ---
 requests>=2.28.0
 
-# --- AI Analysis (Claude API) ---
+# --- AI Analysis (Claude API 直接課金モード) ---
 anthropic>=0.40.0         # Claude Opus 4.6 による市場分析 (claude_analyst.py)
+
+# --- COWORK モード (Claude Code サブスクリプション使用) ---
+claude-agent-sdk           # Claude Code Agent SDK (cowork_runner.py)
+anyio>=4.0.0               # async ランタイム (claude-agent-sdk の依存)
 
 # --- Optional: Japanese Font Support ---
 # matplotlib-fontja             # 日本語フォント (pip install matplotlib-fontja)
