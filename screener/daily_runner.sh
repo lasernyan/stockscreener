@@ -18,7 +18,9 @@
 # 環境変数:
 #   RUN_FETCH=1      # API データ取得を有効化 (default: 1)
 #   RUN_BACKTEST=1   # バックテストを有効化 (default: 1)
-#   RUN_AI=1         # Claude AI 分析を有効化 (default: 1)
+#   RUN_AI=1         # Claude AI 分析を有効化 (Anthropic API, default: 0)
+#   USE_COWORK=1     # COWORK モード: Claude Code Agent SDK で分析 (default: 1)
+#                    # USE_COWORK=1 の場合 RUN_AI は無視される
 #   MARKET_FETCH=ALL # 取得マーケット指定 (default: ALL)
 # ============================================================
 
@@ -94,12 +96,14 @@ fi
 # ============================================================
 RUN_FETCH="${RUN_FETCH:-1}"
 RUN_BACKTEST="${RUN_BACKTEST:-1}"
-RUN_AI="${RUN_AI:-1}"
+RUN_AI="${RUN_AI:-0}"
+USE_COWORK="${USE_COWORK:-1}"   # デフォルトは COWORK モード
 MARKET_FETCH="${MARKET_FETCH:-ALL}"
 
 log_info "========================================"
 log_info "Daily Runner started"
-log_info "  FETCH=$RUN_FETCH  BACKTEST=$RUN_BACKTEST  AI=$RUN_AI"
+log_info "  FETCH=$RUN_FETCH  BACKTEST=$RUN_BACKTEST"
+log_info "  COWORK=$USE_COWORK  AI=$RUN_AI"
 log_info "  MARKET=$MARKET_FETCH"
 log_info "========================================"
 
@@ -156,10 +160,33 @@ if [ "$RUN_BACKTEST" = "1" ]; then
 fi
 
 # ============================================================
-# Step 3: Claude AI 分析
+# Step 3: 分析レポート生成 (COWORK or Anthropic API)
 # ============================================================
-if [ "$RUN_AI" = "1" ]; then
-    log_info "[STEP 3] Running Claude AI analysis..."
+if [ "$USE_COWORK" = "1" ]; then
+    # --- COWORK モード: Claude Code Agent SDK を使用 ---
+    # Claude Code Pro/Max サブスクリプションで動作 (APIキー不要)
+    log_info "[STEP 3] Running COWORK analysis (Claude Code Agent)..."
+    COWORK_OPTS="--market ${MARKET_FETCH}"
+    if [ "$RUN_FETCH" != "1" ]; then
+        COWORK_OPTS="$COWORK_OPTS --no-fetch"
+    fi
+    if [ "$RUN_BACKTEST" != "1" ]; then
+        COWORK_OPTS="$COWORK_OPTS --no-backtest"
+    fi
+    if python3 "${SCRIPT_DIR}/cowork_runner.py" \
+            --project-dir "$PROJECT_DIR" \
+            $COWORK_OPTS \
+            >> "$LOG_FILE" 2>&1; then
+        log_info "[STEP 3] COWORK analysis completed."
+    else
+        log_warn "[STEP 3] COWORK analysis failed (continuing)."
+        log_warn "  Claude Code CLI がインストール・ログイン済みか確認してください"
+        ERRORS+=("cowork_runner")
+    fi
+
+elif [ "$RUN_AI" = "1" ]; then
+    # --- Anthropic API モード (USE_COWORK=0 かつ RUN_AI=1 のとき) ---
+    log_info "[STEP 3] Running Claude API analysis..."
     if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
         log_warn "[STEP 3] ANTHROPIC_API_KEY not set. Skipping AI analysis."
         log_warn "  Set it in ${ENV_FILE}: ANTHROPIC_API_KEY=sk-ant-..."
