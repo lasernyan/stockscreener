@@ -10,10 +10,13 @@ numpy>=1.24.0
 matplotlib>=3.7.0
 
 # --- Financial Data ---
-yfinance>=0.2.30          # 株価・テクニカルデータ (yfinance)
+yfinance>=0.2.30          # 株価・ETF・暗号資産・コモディティ・FXデータ
 
 # --- HTTP Requests (EDINET / e-STAT API) ---
 requests>=2.28.0
+
+# --- AI Analysis (Claude API) ---
+anthropic>=0.40.0         # Claude Opus 4.6 による市場分析 (claude_analyst.py)
 
 # --- Optional: Japanese Font Support ---
 # matplotlib-fontja             # 日本語フォント (pip install matplotlib-fontja)
@@ -22,5 +25,6 @@ requests>=2.28.0
 # openpyxl>=3.1.0              # Excel 出力が必要な場合
 
 # --- Notes ---
+# ANTHROPIC_API_KEY: https://console.anthropic.com/
 # EDINET API Key: https://disclosure2dl.edinet-api.go.jp/guide/static/disclosure/REVISION_01/index.html
 # e-STAT App ID:  https://www.e-stat.go.jp/api/
