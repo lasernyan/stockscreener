@@ -1,1 +1,12 @@
 __pycache__/
+*.pyc
+
+# APIキー・シークレット (絶対コミットしない)
+.env
+
+# ログ
+logs/
+*.log
+
+# ロックファイル
+.daily_runner.lock
